@@ -358,40 +358,89 @@ void CPU::execute() {
         }
         // Integer Register-Register Instructions (R-type)
         case 0x33: {
-            switch (decodedInstruction.funct3) {
-                case 0x0: // ADD and SUB
-                    if (decodedInstruction.funct7 == 0x00) { // ADD
-                        aluResult = registers[decodedInstruction.rs1] + registers[decodedInstruction.rs2];
-                    } else if (decodedInstruction.funct7 == 0x20) { // SUB
-                        aluResult = registers[decodedInstruction.rs1] - registers[decodedInstruction.rs2];  
+            switch (decodedInstruction.funct7){
+                case 0x00:
+                case 0x20:
+                    switch (decodedInstruction.funct3) {
+                        case 0x0: // ADD and SUB
+                            if (decodedInstruction.funct7 == 0x00) { // ADD
+                                aluResult = registers[decodedInstruction.rs1] + registers[decodedInstruction.rs2];
+                            } else if (decodedInstruction.funct7 == 0x20) { // SUB
+                                aluResult = registers[decodedInstruction.rs1] - registers[decodedInstruction.rs2];  
+                            }
+                            break;
+                        case 0x1: // SLL
+                            aluResult = registers[decodedInstruction.rs1] << (registers[decodedInstruction.rs2] & 0x1F);
+                            break;
+                        case 0x2: // SLT
+                            aluResult = (registers[decodedInstruction.rs1] < registers[decodedInstruction.rs2]) ? 1 : 0;
+                            break;
+                        case 0x3: // SLTU
+                            aluResult = ((uint32_t)registers[decodedInstruction.rs1] < (uint32_t)registers[decodedInstruction.rs2]) ? 1 : 0;
+                            break;
+                        case 0x4: // XOR
+                            aluResult = registers[decodedInstruction.rs1] ^ registers[decodedInstruction.rs2];
+                            break;
+                        case 0x5: // SRL and SRA
+                            if (decodedInstruction.funct7 == 0x00) { // SRL
+                                aluResult = registers[decodedInstruction.rs1] >> (registers[decodedInstruction.rs2] & 0x1F);
+                            } else if (decodedInstruction.funct7 == 0x20 ) { // SRA
+                                aluResult = (int32_t)registers[decodedInstruction.rs1] >> (registers[decodedInstruction.rs2] & 0x1F); // Arithmetic right shift
+                            }
+                            break;
+                        case 0x6: // OR
+                            aluResult = registers[decodedInstruction.rs1] | registers[decodedInstruction.rs2];
+                            break;
+                        case 0x7: // AND
+                            aluResult = registers[decodedInstruction.rs1] & registers[decodedInstruction.rs2];
+                            break;  
                     }
-                    break;
-                case 0x1: // SLL
-                    aluResult = registers[decodedInstruction.rs1] << (registers[decodedInstruction.rs2] & 0x1F);
-                    break;
-                case 0x2: // SLT
-                    aluResult = (registers[decodedInstruction.rs1] < registers[decodedInstruction.rs2]) ? 1 : 0;
-                    break;
-                case 0x3: // SLTU
-                    aluResult = ((uint32_t)registers[decodedInstruction.rs1] < (uint32_t)registers[decodedInstruction.rs2]) ? 1 : 0;
-                    break;
-                case 0x4: // XOR
-                    aluResult = registers[decodedInstruction.rs1] ^ registers[decodedInstruction.rs2];
-                    break;
-                case 0x5: // SRL and SRA
-                    if (decodedInstruction.funct7 == 0x00) { // SRL
-                        aluResult = registers[decodedInstruction.rs1] >> (registers[decodedInstruction.rs2] & 0x1F);
-                    } else if (decodedInstruction.funct7 == 0x20 ) { // SRA
-                        aluResult = (int32_t)registers[decodedInstruction.rs1] >> (registers[decodedInstruction.rs2] & 0x1F); // Arithmetic right shift
+                break;
+                //Multiplication and Division Instructions (M-type)
+                case 0x01: {
+                    switch (decodedInstruction.funct3) {
+                        case 0x0: // MUL
+                            aluResult = registers[decodedInstruction.rs1] * registers[decodedInstruction.rs2];
+                            break;
+                        case 0x1: // MULH
+                            aluResult = ((int64_t)(int32_t)registers[decodedInstruction.rs1] * (int64_t)(int32_t)registers[decodedInstruction.rs2]) >> 32;
+                            break;
+                        case 0x2: // MULHSU
+                            aluResult = ((int64_t)(int32_t)registers[decodedInstruction.rs1] * (uint64_t)(uint32_t)registers[decodedInstruction.rs2]) >> 32;
+                            break;
+                        case 0x3: // MULHU
+                            aluResult = ((uint64_t)(uint32_t)registers[decodedInstruction.rs1] * (uint64_t)(uint32_t)registers[decodedInstruction.rs2]) >> 32;
+                            break;
+                        case 0x4: // DIV
+                            if (registers[decodedInstruction.rs2] == 0) {
+                                aluResult = -1; // Division by zero returns -1
+                            } else {
+                                aluResult = (int32_t)registers[decodedInstruction.rs1] / (int32_t)registers[decodedInstruction.rs2];
+                            }
+                            break;
+                        case 0x5: // DIVU
+                            if (registers[decodedInstruction.rs2] == 0) {
+                                aluResult = UINT32_MAX; // Division by zero returns max unsigned value
+                            } else {
+                                aluResult = registers[decodedInstruction.rs1] / registers[decodedInstruction.rs2];
+                            }
+                            break;
+                        case 0x6: // REM
+                            if (registers[decodedInstruction.rs2] == 0) {
+                                aluResult = registers[decodedInstruction.rs1]; // Remainder by zero returns dividend
+                            } else {
+                                aluResult = (int32_t)registers[decodedInstruction.rs1] % (int32_t)registers[decodedInstruction.rs2];
+                            }
+                            break;
+                        case 0x7: // REMU
+                            if (registers[decodedInstruction.rs2] == 0) {
+                                aluResult = registers[decodedInstruction.rs1]; // Remainder by zero returns dividend
+                            } else {
+                                aluResult = registers[decodedInstruction.rs1] % registers[decodedInstruction.rs2];
+                            }
+                        }
                     }
-                    break;
-                case 0x6: // OR
-                    aluResult = registers[decodedInstruction.rs1] | registers[decodedInstruction.rs2];
-                    break;
-                case 0x7: // AND
-                    aluResult = registers[decodedInstruction.rs1] & registers[decodedInstruction.rs2];
-                    break;  
-            }
+                }
             break;
         }
         // Load and Store Instructions (I-type for load, S-type for store)
