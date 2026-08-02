@@ -21,12 +21,12 @@ SRCS = $(wildcard $(SRC_DIR)/*.cpp)
 # Convert the list of .cpp files into a list of .o (object) files in the build dir
 OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(SRCS))
 
-	# 4. Target Executable Name
-	TARGET = $(BUILD_DIR)/cpu_emulator
+# 4. Target Executable Name
+TARGET = $(BUILD_DIR)/cpu_emulator
 
-	# ==========================================
-	# Build Rules
-	# ==========================================
+# ==========================================
+# Build Rules (main simulator)
+# ==========================================
 
 # 'all' is the default target when you just type 'make'
 all: $(TARGET)
@@ -47,7 +47,43 @@ $(BUILD_DIR):
 # Rule to clean up compiled files (run 'make clean')
 clean:
 	rm -rf $(BUILD_DIR)/*
+	rm -f $(TEST_DIR)/test.elf $(TEST_DIR)/test.bin $(TEST_DIR)/test.dis
 	@echo "Build directory cleaned!"
 
+# ==========================================
+# RISC-V Test Program Build (separate toolchain)
+# ==========================================
+RISCV_CC = riscv64-unknown-elf-gcc
+RISCV_OBJCOPY = riscv64-unknown-elf-objcopy
+RISCV_OBJDUMP = riscv64-unknown-elf-objdump
+RISCV_FLAGS = -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding -O0
+
+TEST_DIR = tests/basic
+
+# Compiles start.s + main.c into test.elf, then extracts test.bin
+$(TEST_DIR)/test.bin: $(TEST_DIR)/start.s $(TEST_DIR)/main.c $(TEST_DIR)/link.ld
+	$(RISCV_CC) $(RISCV_FLAGS) -T $(TEST_DIR)/link.ld \
+	  -o $(TEST_DIR)/test.elf $(TEST_DIR)/start.s $(TEST_DIR)/main.c
+	$(RISCV_OBJCOPY) -O binary $(TEST_DIR)/test.elf $(TEST_DIR)/test.bin
+	$(RISCV_OBJDUMP) -d $(TEST_DIR)/test.elf > $(TEST_DIR)/test.dis
+	@echo "Test binary built: $(TEST_DIR)/test.bin (see test.dis for disassembly)"
+
+test: $(TEST_DIR)/test.bin
+	@echo "Test binary ready. Run 'make run-test' to execute it on your simulator."
+
+# ==========================================
+# Test Harness Build (runs test.bin on your CPU/Memory model)
+# ==========================================
+TEST_TARGET = $(BUILD_DIR)/run_test
+
+# Linked directly against CPU.cpp/memory.cpp -- NOT src/main.cpp,
+# since that already has its own main() and would clash with tests/basic/main.cpp
+$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+	@echo "Test harness built! Run with: ./$(TEST_TARGET)"
+
+run-test: $(TEST_DIR)/test.bin $(TEST_TARGET)
+	./$(TEST_TARGET)
+
 # Phony targets aren't actual files
-.PHONY: all clean
+.PHONY: all clean test run-test
