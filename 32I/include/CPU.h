@@ -18,6 +18,10 @@ private:
     reg_t instruction;          // The current instruction being executed
     reg_t aluResult;            // Result from the ALU operation
     reg_t memResult;            // Result from memory read operation
+    reg_t cycle_count;          // Counts completed cycles (one per fetch..writeback pass);
+                                 // separate from the 32 GPRs, not addressable by any instruction
+    bool halted;                // Set by execute() when a jump/branch targets its own address
+                                 // (this codebase's halt idiom, e.g. start.s's `_end: j _end`)
     Memory* memory;            // Pointer to the memory object
     // Helper method to enforce hardware rules
     void enforce_zero_register();
@@ -53,6 +57,13 @@ public:
     void writeback();
     // Debugging method to print the CPU state
     void print_state();
+    // True once execute() has seen a jump/branch that targets its own address
+    bool is_halted() const { return halted; }
+    // Overrides the reset PC (default 0). For harnesses that load a binary at
+    // a non-zero base address -- e.g. tests/riscv-arch-test/harness.cpp,
+    // whose linker script uses a non-zero origin so qemu-riscv32 can also run
+    // the same binary as its reference (qemu-user refuses to mmap address 0).
+    void set_pc(reg_t addr) { pc = addr; }
 };
 
 #endif // CPU_H

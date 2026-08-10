@@ -34,6 +34,7 @@ int main(int argc, char* argv[]) {
         cpu.execute();
         cpu.read();
         cpu.writeback();
+        if (cpu.is_halted()) break; // program reached its `j _end` halt loop
     }
 
     std::cout << "\n--- Final State ---" << std::endl;

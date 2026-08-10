@@ -9,6 +9,8 @@ CPU::CPU(Memory* mem_ptr) {
 
     std::memset(registers, 0, sizeof(registers));
     pc = 0;
+    cycle_count = 0;
+    halted = false;
 }
 
 // Enforces that register x0 is always hardwired to 0
@@ -20,7 +22,8 @@ void CPU::enforce_zero_register() {
 void CPU::print_state() {
     std::cout << "--- CPU State ---" << std::endl;
     std::cout << "PC: 0x" << std::hex << std::setfill('0') << std::setw(8) << pc << std::endl;
-    
+    std::cout << "Cycles: " << std::dec << cycle_count << std::endl;
+
     for (int i = 0; i < NUM_REGS; i++) {
         std::cout << "x" << std::dec << i << ": 0x" 
                   << std::hex << std::setfill('0') << std::setw(8) << registers[i] << "  ";
@@ -218,8 +221,8 @@ void CPU::execute() {
                         case 0x1: // SLL
                             aluResult = registers[decodedInstruction.rs1] << (registers[decodedInstruction.rs2] & 0x1F);
                             break;
-                        case 0x2: // SLT
-                            aluResult = (registers[decodedInstruction.rs1] < registers[decodedInstruction.rs2]) ? 1 : 0;
+                        case 0x2: // SLT (signed comparison, unlike SLTU below)
+                            aluResult = ((int32_t)registers[decodedInstruction.rs1] < (int32_t)registers[decodedInstruction.rs2]) ? 1 : 0;
                             break;
                         case 0x3: // SLTU
                             aluResult = ((uint32_t)registers[decodedInstruction.rs1] < (uint32_t)registers[decodedInstruction.rs2]) ? 1 : 0;
@@ -260,6 +263,8 @@ void CPU::execute() {
                         case 0x4: // DIV
                             if (registers[decodedInstruction.rs2] == 0) {
                                 aluResult = -1; // Division by zero returns -1
+                            } else if (registers[decodedInstruction.rs1] == 0x80000000 && (int32_t)registers[decodedInstruction.rs2] == -1) {
+                                aluResult = 0x80000000; // Signed overflow (INT_MIN / -1): result is INT_MIN, no trap
                             } else {
                                 aluResult = (int32_t)registers[decodedInstruction.rs1] / (int32_t)registers[decodedInstruction.rs2];
                             }
@@ -274,6 +279,8 @@ void CPU::execute() {
                         case 0x6: // REM
                             if (registers[decodedInstruction.rs2] == 0) {
                                 aluResult = registers[decodedInstruction.rs1]; // Remainder by zero returns dividend
+                            } else if (registers[decodedInstruction.rs1] == 0x80000000 && (int32_t)registers[decodedInstruction.rs2] == -1) {
+                                aluResult = 0; // Signed overflow (INT_MIN / -1): remainder is 0, no trap
                             } else {
                                 aluResult = (int32_t)registers[decodedInstruction.rs1] % (int32_t)registers[decodedInstruction.rs2];
                             }
@@ -345,6 +352,9 @@ void CPU::execute() {
             break;
         }
     }
+    // A jump/branch whose target is its own address (e.g. start.s's `_end: j _end`)
+    // is this codebase's halt idiom -- the program has finished and is spinning forever.
+    halted = (next_pc == pc);
 }
 
 void CPU::read() {
@@ -404,157 +414,5 @@ void CPU::writeback() {
     enforce_zero_register();
     //update the pc
     pc = next_pc;
+    cycle_count++;
 }
-
-// void CPU::decode() {
-//     // Logic to extract opcode, rd, rs1, rs2, etc.
-//     // Get the opcode
-//     uint8_t opcode = instruction & 0x7F; // Extract the last 7 bits for opcode
-//     switch (opcode) {
-//         //Integer Register-Immediate Instructions (I-type)
-//         // 0010011 ADDI SLTI SLTIU XORI ORI ANDI SLLI SRLI SRAI
-//         case 0x13: {
-//             // Extract fields for I-type instruction
-//             uint8_t rd = (instruction >> 7) & 0x1F; // bits 11-7    
-//             uint8_t funct3 = (instruction >> 12) & 0x07; // bits 14-12
-//             uint8_t rs1 = (instruction >> 15) & 0x1F; // bits 19-15
-//             int32_t imm = (int32_t)(instruction) >> 20; // bits 31-20, sign-extended
-//             //ADDI adds the sign-extended 12-bit immediate to register rs1. Arithmetic overflow is ignored and
-//             //the result is simply the low XLEN bits of the result. ADDI rd, rs1, 0 is used to implement the MV
-//             //rd, rs1 assembler pseudo-instruction.
-//             switch (funct3) {
-//                 case 0x0: // ADDI
-//                     registers[rd] = registers[rs1] + imm;
-//                     break;
-//                 case 0x2: // SLTI
-//                     registers[rd] = (registers[rs1] < imm) ? 1 : 0;
-//                     break;
-//                 case 0x3: // SLTIU
-//                     registers[rd] = ((uint32_t)registers[rs1] < (uint32_t)imm) ? 1 : 0;
-//                     break;
-//                 case 0x4: // XORI
-//                     registers[rd] = registers[rs1] ^ imm;
-//                     break;
-//                 case 0x6: // ORI
-//                     registers[rd] = registers[rs1] | imm;
-//                     break;
-//                 case 0x7: // ANDI
-//                     registers[rd] = registers[rs1] & imm;
-//                     break;
-//                 case 0x1: // SLLI
-//                     registers[rd] = registers[rs1] << (imm & 0x1F);
-//                     break;
-//                 case 0x5: // SRLI and SRAI
-//                     if ((imm >> 10) & 0x1) { // Check if it's SRAI
-//                         registers[rd] = (int32_t)registers[rs1] >> (imm & 0x1F); // Arithmetic right shift
-//                     } else { // SRLI
-//                         registers[rd] = registers[rs1] >> (imm & 0x1F); // Logical right shift
-//                     }
-//                     break;
-//             }
-//         }
-//         // LUI and AUIPC Instructions (U-type)
-//         case 0x37: { // LUI 1110111
-//             uint8_t rd = (instruction >> 7) & 0x1F;
-//             int32_t imm = instruction & 0xFFFFF000; // bits 31-12, upper 20 bits
-//             registers[rd] = imm;    
-//             break;
-//         }
-//         case 0x17: { // AUIPC 0010111
-//             uint8_t rd = (instruction >> 7) & 0x1F;
-//             int32_t imm = instruction & 0xFFFFF000; // bits 31-12, upper 20 bits
-//             registers[rd] = pc + imm; // Add immediate to current PC
-//             break;
-//         }
-//         // Integer Register-Register Instructions (R-type)
-//         case 0x33: {
-//             uint8_t rd = (instruction >> 7) & 0x1F;
-//             uint8_t funct3 = (instruction >> 12) & 0x07;
-//             uint8_t rs1 = (instruction >> 15) & 0x1F;
-//             uint8_t rs2 = (instruction >> 20) & 0x1F;
-//             uint8_t funct7 = (instruction >> 25) & 0x7F;
-//             switch (funct3) {
-//                 case 0x0: // ADD and SUB
-//                     if (funct7 == 0x00) { // ADD
-//                         registers[rd] = registers[rs1] + registers[rs2];
-//                     } else if (funct7 == 0x20) { // SUB
-//                         registers[rd] = registers[rs1] - registers[rs2];  
-//                     }
-//                     break;
-//                 case 0x1: // SLL
-//                     registers[rd] = registers[rs1] << (registers[rs2] & 0x1F);
-//                     break;
-//                 case 0x2: // SLT
-//                     registers[rd] = (registers[rs1] < registers[rs2]) ? 1 : 0;
-//                     break;
-//                 case 0x3: // SLTU
-//                     registers[rd] = ((uint32_t)registers[rs1] < (uint32_t)registers[rs2]) ? 1 : 0;
-//                     break;
-//                 case 0x4: // XOR
-//                     registers[rd] = registers[rs1] ^ registers[rs2];
-//                     break;
-//                 case 0x5: // SRL and SRA
-//                     if (funct7 == 0x00) { // SRL
-//                         registers[rd] = registers[rs1] >> (registers[rs2] & 0x1F);
-//                     } else if (funct7 == 0x20 ) { // SRA
-//                         registers[rd] = (int32_t)registers[rs1] >> (registers[rs2] & 0x1F); // Arithmetic right shift
-//                     }
-//                     break;
-//                 case 0x6: // OR
-//                     registers[rd] = registers[rs1] | registers[rs2];
-//                     break;
-//                 case 0x7: // AND
-//                     registers[rd] = registers[rs1] & registers[rs2];
-//                     break;  
-//             }
-//             break;
-//         }
-//         // Load and Store Instructions (I-type for load, S-type for store)
-//         case 0x03: { // Load instructions
-//             uint8_t rd = (instruction >> 7) & 0x1F;
-//             uint8_t funct3 = (instruction >> 12) & 0x07;
-//             uint8_t rs1 = (instruction >> 15) & 0x1F;
-//             int32_t imm = (int32_t)(instruction) >> 20; // bits 31-20, sign-extended
-//             uint32_t address = registers[rs1] + imm;
-//             switch (funct3) {
-//                 case 0x0: // LB
-//                     registers[rd] = (int32_t)(int8_t)memory->read_byte(address); // Sign-extend byte
-//                     break;
-//                 case 0x1: // LH         
-//                     registers[rd] = (int32_t)(int16_t)memory->read_halfword(address); // Sign-extend halfword
-//                     break;
-//                 case 0x2: // LW
-//                     registers[rd] = memory->read_word(address);
-//                     break;
-//                 case 0x4: // LBU
-//                     registers[rd] = memory->read_byte(address); // Zero-extend byte
-//                     break;
-//                 case 0x5: // LHU
-//                     registers[rd] = memory->read_halfword(address); // Zero-extend halfword
-//                     break;  
-//             }
-//             break;
-//         }
-//         case 0x23: { // Store instructions
-//             uint8_t funct3 = (instruction >> 12) & 0x07;
-//             uint8_t rs1 = (instruction >> 15) & 0x1F;
-//             uint8_t rs2 = (instruction >> 20) & 0x1F;
-//             int32_t imm = ((instruction >> 7) & 0x1F) | (((int32_t)(instruction) >> 25) << 5); // bits 11-7 and 31-25, sign-extended
-//             uint32_t address = registers[rs1] + imm;
-//             switch (funct3) {
-//                 case 0x0: // SB
-//                     memory->write_byte(address, registers[rs2] & 0xFF);
-//                     break;
-//                 case 0x1: // SH
-//                     memory->write_halfword(address, registers[rs2] & 0xFFFF);
-//                     break;
-//                 case 0x2: // SW
-//                     memory->write_word(address, registers[rs2]);
-//                     break;  
-//             }
-//             break;
-//         }
-//         // Branch Instructions (B-type)
-//         //@todo: Implement branch instructions (B-type) in the decode method
-//     }
-// }

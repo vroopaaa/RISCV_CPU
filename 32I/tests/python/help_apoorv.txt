@@ -1,0 +1,1 @@
+iscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding -O3 -S mul_high_test.c -o mlt_O3.s

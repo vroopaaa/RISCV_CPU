@@ -43,14 +43,24 @@ RISCV_FLAGS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Test registry: filename -> number of simulator cycles to allow
-# (recursive/looping tests need more cycles than straight-line ones)
+# Test list: one C filename (from c_tests/) per line in run_tests_list.txt.
+# Blank lines and '#' comments are ignored. The simulator halts on its own
+# once a test program finishes (CPU::is_halted()), so MAX_CYCLES only needs
+# to be a generous upper bound, not a tuned per-test value.
 # ---------------------------------------------------------------------------
-TESTS = {
-    "mul_test.c": 200,
-    "fib_test.c": 800,
-    "fact_test.c": 1500,
-}
+TEST_LIST = os.path.join(SCRIPT_DIR, "run_tests_list.txt")
+MAX_CYCLES = 5000
+
+
+def load_test_list(path):
+    """Read one test filename per line; blank lines and '#' comments are ignored."""
+    names = []
+    with open(path) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                names.append(line)
+    return names
 
 
 def run(cmd, **kwargs):
@@ -115,17 +125,19 @@ def main():
     print("Building simulator test harness...")
     build_harness()
 
+    test_names = load_test_list(TEST_LIST)
+
     rows = []
     all_passed = True
 
-    for filename, cycles in TESTS.items():
+    for filename in test_names:
         name = os.path.splitext(filename)[0]
         c_path = os.path.join(C_DIR, filename)
 
         try:
             native_result = run_native(c_path, name)
             bin_path = build_riscv_bin(c_path, name)
-            sim_result = run_simulator(bin_path, cycles)
+            sim_result = run_simulator(bin_path, MAX_CYCLES)
             passed = (native_result == sim_result)
             status = "PASS" if passed else "FAIL"
         except Exception as e:

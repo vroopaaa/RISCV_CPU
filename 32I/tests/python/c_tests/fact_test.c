@@ -7,7 +7,10 @@ int fact(int n) {
 }
 
 int compute() {
-    return fact(5);   // expected: 120
+    // volatile: without this, GCC constant-folds the whole recursion at -O2+
+    // into `li a0,120; ret` -- no jal/jalr/MUL would run at all.
+    volatile int n = 5;
+    return fact(n);   // expected: 120
 }
 
 #ifdef NATIVE_TEST
