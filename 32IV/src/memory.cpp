@@ -44,6 +44,20 @@ uint32_t Memory::read_word(uint32_t address) {
     return (byte3 << 24) | (byte2 << 16) | (byte1 << 8) | byte0;
 }
 
+bool Memory::probe(uint32_t address, uint32_t n) const {
+    return (uint64_t)address + n <= mem_array.size();
+}
+
+std::vector<uint8_t> Memory::read_bytes(uint32_t address, uint32_t n) {
+    std::vector<uint8_t> result(n, 0);
+    if (!check_bounds(address, n)) return result;
+
+    for (uint32_t i = 0; i < n; i++) {
+        result[i] = mem_array[address + i];
+    }
+    return result;
+}
+
 // ==========================================
 // WRITE FUNCTIONS (Little-Endian)
 // ==========================================
@@ -69,4 +83,17 @@ void Memory::write_word(uint32_t address, uint32_t data) {
     mem_array[address + 1] = (data >> 8) & 0xFF;
     mem_array[address + 2] = (data >> 16) & 0xFF;
     mem_array[address + 3] = (data >> 24) & 0xFF; // Highest byte
+}
+
+// Byte-enabled write: bytes with byte_we[i] == false are left completely untouched
+// (used by masked vector stores, where inactive lanes must have zero side effect).
+void Memory::write_bytes(uint32_t address, const std::vector<uint8_t>& data, const std::vector<bool>& byte_we) {
+    uint32_t n = static_cast<uint32_t>(data.size());
+    if (!check_bounds(address, n)) return;
+
+    for (uint32_t i = 0; i < n; i++) {
+        if (byte_we[i]) {
+            mem_array[address + i] = data[i];
+        }
+    }
 }

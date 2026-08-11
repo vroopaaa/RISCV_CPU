@@ -8,6 +8,7 @@ CPU::CPU(Memory* mem_ptr) {
     memory = mem_ptr;
 
     std::memset(registers, 0, sizeof(registers));
+    std::memset(&vregfile, 0, sizeof(vregfile));
     pc = 0;
 }
 
@@ -29,6 +30,17 @@ void CPU::print_state() {
     std::cout << "-----------------" << std::endl;
 }
 
+// Debug helper: dump a vector register's raw bytes (little-endian within each element).
+void CPU::print_vector_reg(uint8_t idx) {
+    std::cout << "v" << std::dec << (int)idx << ": ";
+    for (uint32_t b = 0; b < VLEN_BYTES; b++) {
+        std::cout << std::hex << std::setfill('0') << std::setw(2)
+                   << (int)vregfile.vregs[idx][b] << " ";
+        if ((b + 1) % 16 == 0 && b + 1 != VLEN_BYTES) std::cout << "\n    ";
+    }
+    std::cout << std::dec << std::endl;
+}
+
 void CPU::fetch() {
     // Logic to read from memory using PC and store in instruction
     // update the PC to point to the next instruction
@@ -39,6 +51,8 @@ void CPU::fetch() {
     mem_read_enable = false; // Reset memory read enable
     mem_write_enable = false; // Reset memory write enable
     reg_write_enable = false; // Reset register write enable
+    vector_mem_enable = false; // Reset vector memory enable
+    vector_instruction_active = false; // Reset vector instruction flag
 }
 
 
@@ -138,8 +152,20 @@ void CPU::decode() {
             mem_write_enable = false;
             reg_write_enable = true;  // Save Return Address (PC + 4) to 'rd'
             break;
-        case 0x57: // Vector Instructions (VSETVLI, VSETIVLI, etc.)
+        case 0x57: // Vector config instructions (VSETVLI, VSETIVLI, VSETVL)
+        case 0x07: // Vector Load
+        case 0x27: // Vector Store
+            // All three vector opcodes are committed by vector_writeback() (config writes
+            // a scalar rd, load commits into the vector register file, store is a no-op
+            // there since it already completed in vector_read()) - keep the generic
+            // scalar mem/reg enables off so CPU::read()/writeback()'s scalar paths never
+            // touch decodedInstruction.rd/aluResult for these opcodes.
             vector_decode(); // Decode vector-specific fields
+            reg_write_enable = false;
+            mem_read_enable = false;
+            mem_write_enable = false;
+            vector_instruction_active = true;
+            vector_mem_enable = (decodedInstruction.opcode == 0x07 || decodedInstruction.opcode == 0x27);
             break;
         // ---------------------------------------------------------
         // Default Fallback (Safety)
@@ -352,7 +378,12 @@ void CPU::execute() {
             vector_config_execute(); // Execute vector configuration instructions
             break;
         }
-    }   
+        case 0x07: // Vector Load
+        case 0x27: { // Vector Store
+            vector_load_store_execute(); // Per-lane address generation + active-lane mask
+            break;
+        }
+    }
 }
 
 void CPU::read() {
@@ -393,8 +424,16 @@ void CPU::read() {
                 break;
             case 0x2: // SW (Store Word)
                 memory->write_word(aluResult, registers[decodedInstruction.rs2]);
-                break;  
+                break;
         }
+    }
+
+    // ---------------------------------------------------------
+    // Vector Load/Store (wide memory access - actual read/write happens here,
+    // mirroring the scalar load/store split between execute() and read())
+    // ---------------------------------------------------------
+    if (vector_mem_enable) {
+        vector_read();
     }
 }
 void CPU::writeback() {
@@ -408,6 +447,13 @@ void CPU::writeback() {
             }
         }
     }
+    // vector_writeback() is the single commit point for all vector opcodes: it writes the
+    // scalar rd for config instructions, commits the merged buffer into the vector
+    // register file for loads, and is a no-op for stores (already done in vector_read()).
+    if (vector_instruction_active) {
+        vector_writeback();
+    }
+
     // Always enforce x0=0 at the end of execution
     enforce_zero_register();
     //update the pc
