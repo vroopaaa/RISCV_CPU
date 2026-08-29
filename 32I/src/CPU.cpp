@@ -1,4 +1,5 @@
 #include "../include/CPU.h"
+#include "../include/NPU.h"
 #include <iostream>
 #include <cstring>
 #include <iomanip>
@@ -109,6 +110,20 @@ void CPU::decode() {
             mem_read_enable  = false;
             mem_write_enable = false;
             reg_write_enable = true;  // Save ALU result to 'rd'
+            break;
+
+        // Custom-0: NPU tile transfer / memory print (.insn r 0x0B, funct3,
+        // 0, x0, rs1, rs2) -- funct3 0/1 read a 16x16 tile stored
+        // contiguously in memory (rs1=base, rs2 unused) into the NPU's data
+        // window; funct3 2 writes the NPU's result tile back into a
+        // row-major matrix in memory (rs1=base, rs2=row stride in bytes);
+        // funct3 3 prints an NxN region of memory (rs1=base, rs2=N) via
+        // Memory::print_matrix(). All done in read(), touching neither a
+        // register nor the scalar mem_read/write path.
+        case 0x0B:
+            mem_read_enable  = false;
+            mem_write_enable = false;
+            reg_write_enable = false;
             break;
 
         // ---------------------------------------------------------
@@ -351,10 +366,14 @@ void CPU::execute() {
             next_pc = (registers[decodedInstruction.rs1] + decodedInstruction.imm_I) & ~1; // Jump to target, ensure LSB is 0
             break;
         }
+        case 0x0B: { // Custom-0: NPU strided tile transfer / memory print
+            aluResult = registers[decodedInstruction.rs1]; // base address, consumed by read()
+            break;
+        }
     }
     // A jump/branch whose target is its own address (e.g. start.s's `_end: j _end`)
     // is this codebase's halt idiom -- the program has finished and is spinning forever.
-    halted = (next_pc == pc);
+    halted = (next_pc == pc);   
 }
 
 void CPU::read() {
@@ -395,7 +414,47 @@ void CPU::read() {
                 break;
             case 0x2: // SW (Store Word)
                 memory->write_word(aluResult, registers[decodedInstruction.rs2]);
-                break;  
+                break;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Custom-0 (opcode 0x0B): NPU tile transfer (funct3 0/1/2) or a general
+    // memory print (funct3 3). rs1 = base address.
+    //
+    // funct3 0/1 (loads) read the source tile as one contiguous 256-word
+    // block -- the caller is responsible for laying tiles out contiguously
+    // in memory ahead of time, so this is a single access rather than 16
+    // separate strided row reads. rs2 is unused here.
+    //
+    // funct3 2 (store) still writes strided, since the destination is a
+    // plain row-major matrix (rows are BIG_DIM apart, not tile-contiguous):
+    // rs2 = row stride in bytes.
+    //
+    // funct3 3 prints an NxN region (rs2 = N) via Memory::print_matrix,
+    // unrelated to the NPU -- just a general "print memory" instruction.
+    // ---------------------------------------------------------
+    if (decodedInstruction.opcode == 0x0B) {
+        uint32_t base = aluResult;
+        uint32_t rs2_val = registers[decodedInstruction.rs2];
+        switch (decodedInstruction.funct3) {
+            case 0x0: // load Matrix A: memory -> NPU (tile is contiguous in memory)
+                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                    memory->write_word(NPU::MAT_A_ADDR + i * 4, memory->read_word(base + i * 4));
+                break;
+            case 0x1: // load Matrix B: memory -> NPU (tile is contiguous in memory)
+                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                    memory->write_word(NPU::MAT_B_ADDR + i * 4, memory->read_word(base + i * 4));
+                break;
+            case 0x2: // store Matrix C: NPU -> memory (rs2_val = row stride)
+                for (uint32_t row = 0; row < NPU::MAX_DIM; row++)
+                    for (uint32_t col = 0; col < NPU::MAX_DIM; col++)
+                        memory->write_word(base + row * rs2_val + col * 4,
+                                            memory->read_word(NPU::RESULT_ADDR + (row * NPU::MAX_DIM + col) * 4));
+                break;
+            case 0x3: // print NxN region of memory at base (rs2_val = N)
+                memory->print_matrix(base, rs2_val, rs2_val);
+                break;
         }
     }
 }

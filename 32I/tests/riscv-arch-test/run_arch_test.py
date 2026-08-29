@@ -60,6 +60,8 @@ HARNESS_SRCS = [
     os.path.join(SCRIPT_DIR, "..", "basic", "loader.cpp"),
     os.path.join(PROJECT_ROOT, "src", "CPU.cpp"),
     os.path.join(PROJECT_ROOT, "src", "memory.cpp"),
+    os.path.join(PROJECT_ROOT, "src", "NPU.cpp"),
+    os.path.join(PROJECT_ROOT, "src", "NPU_print.cpp"),
 ]
 HARNESS_BIN = os.path.join(BUILD_DIR, "arch_test_harness")
 

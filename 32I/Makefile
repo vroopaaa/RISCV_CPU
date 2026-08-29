@@ -76,9 +76,9 @@ test: $(TEST_DIR)/test.bin
 # ==========================================
 TEST_TARGET = $(BUILD_DIR)/run_test
 
-# Linked directly against CPU.cpp/memory.cpp -- NOT src/main.cpp,
+# Linked directly against CPU.cpp/memory.cpp/NPU.cpp -- NOT src/main.cpp,
 # since that already has its own main() and would clash with tests/basic/main.cpp
-$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp | $(BUILD_DIR)
+$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 	@echo "Test harness built! Run with: ./$(TEST_TARGET)"
 
