@@ -2,21 +2,23 @@
 // `emul 32I npu_matmul_test_256.c`. Not wired into run_tests_list.txt: it's
 // exercising a custom instruction rather than producing a single x10 value
 // through the normal ISA, though it does self-check and return a mismatch
-// count in a0.
+// count in a0 (needs a large cycle budget -- the O(16^3) mismatch-check
+// loop alone runs past 100k cycles).
 //
-// Exercises the custom-0 (opcode 0x0B) NPU strided tile-transfer family
-// added in CPU.cpp, which replaces a 256-word npu_write32 loop with a
-// single instruction:
-//   .insn r 0x0B, 0, 0, x0, rs1, rs2  -- load 16x16 tile at mem[rs1] (row
-//                                        stride rs2 bytes) into Matrix A
+// Exercises the custom-0 (opcode 0x0B) NPU tile-transfer family added in
+// CPU.cpp, which replaces a 256-word npu_write32 loop with a single
+// instruction:
+//   .insn r 0x0B, 0, 0, x0, rs1, rs2  -- load the 16x16 tile stored
+//                                        contiguously at mem[rs1] into
+//                                        Matrix A (rs2 unused)
 //   .insn r 0x0B, 1, 0, x0, rs1, rs2  -- same, into Matrix B
-//   .insn r 0x0B, 2, 0, x0, rs1, rs2  -- store Matrix C into mem[rs1] (row
-//                                        stride rs2 bytes)
+//   .insn r 0x0B, 2, 0, x0, rs1, rs2  -- store Matrix C into mem[rs1], rows
+//                                        rs2 bytes apart (strided write)
 //   .insn r 0x0B, 3, 0, x0, rs1, rs2  -- print the NxN region at mem[rs1]
 //                                        (rs2 = N), via Memory::print_matrix
-// One full 16x16 * 16x16 tile: A/B/C here are contiguous, so stride is
-// just MAX_DIM*sizeof(int32_t) -- the same instruction handles a tile
-// carved out of a larger strided matrix (see matmul_template_2.c).
+// A/B/C here are each one full 16x16 tile (contiguous by construction), so
+// this test can't tell a contiguous load apart from a strided one -- see
+// matmul_template_2.c for a case that actually exercises tiling.
 #include <stdint.h>
 
 static inline void npu_write32(uint32_t addr, uint32_t val) {
@@ -64,7 +66,7 @@ int main() {
     npu_write32(DIM_K_ADDR, MAX_DIM);
     npu_write32(DIM_N_ADDR, MAX_DIM);
 
-    const uint32_t stride = MAX_DIM * sizeof(int32_t); // contiguous here: tile == whole matrix
+    const uint32_t stride = MAX_DIM * sizeof(int32_t); // used only by npu_store_c; loads ignore it
     npu_load_a(A, stride);
     npu_load_b(B, stride);
 

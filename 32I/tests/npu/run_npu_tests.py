@@ -8,8 +8,9 @@ tile is 16x16), this script:
   2. Fills them into a c_tests/matmul_template*.c's {{BIG_DIM}}/{{MATRIX_A_DATA}}/
      {{MATRIX_B_DATA}} placeholders, producing a real .c file. Two templates
      are available (--template): 1 is the original per-word MMIO tile
-     load/store, 2 (default) uses the custom-0 strided tile-transfer
-     instruction (opcode 0x0B) added to CPU.cpp instead.
+     load/store, 2 (default) uses the custom-0 tile-transfer instructions
+     (opcode 0x0B) added to CPU.cpp instead -- A, B, AND the result are all
+     tile-major, so every load/store is one contiguous 256-word access.
   3. Cross-compiles it bare-metal for RV32IM (reusing tests/python/start.s
      and link.ld -- this test needs nothing test-specific from them, just a
      stack and a jump into main()).
@@ -17,8 +18,9 @@ tile is 16x16), this script:
      (build/run_test, the same one tests/basic/main.cpp builds), asking it
      to dump the result region to a file via Memory::dump_range's file
      overload instead of stdout.
-  5. Computes A*B independently in Python and diffs it word-for-word
-     against what the emulator wrote out.
+  5. Computes A*B independently in Python, de-tiles template 2's tile-major
+     dump back into logical (row, col) order (template 1's dump is already
+     row-major), and diffs word-for-word against the emulator's output.
 
 Run from anywhere -- paths are resolved relative to this script's location.
 
@@ -49,8 +51,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))  # tests/np
 TEMPLATE_PATHS = {
     1: os.path.join(SCRIPT_DIR, "c_tests", "matmul_template.c"),
     # Same BIG_DIM/MATRIX_A_DATA/MATRIX_B_DATA placeholders, but tile
-    # load/store use the custom-0 strided tile-transfer instruction
-    # (opcode 0x0B) instead of per-word npu_write32/npu_move_word loops.
+    # load/store use the custom-0 tile-transfer instructions (opcode 0x0B)
+    # instead of per-word npu_write32/npu_move_word loops -- A/B are tile-
+    # major (format_matrix_tiled_c) so the loads are contiguous.
     2: os.path.join(SCRIPT_DIR, "c_tests", "matmul_template_2.c"),
 }
 BUILD_DIR = os.path.join(SCRIPT_DIR, "build")
@@ -130,6 +133,24 @@ def format_matrix_tiled_c(matrix, size, tile=MAX_DIM):
                 row_vals = matrix[ti * tile + r][tj * tile: tj * tile + tile]
                 lines.append("        " + ", ".join(str(v) for v in row_vals) + ",")
     return "\n".join(lines)
+
+
+def detile_values(values, size, tile=MAX_DIM):
+    """Inverse of format_matrix_tiled_c: given a flat list of size*size
+    values in tile-major order (as produced by matmul_template_2.c's
+    tile-major result buffer -- each 16x16 tile contiguous, tiles visited
+    row-major), returns a flat list in plain row-major (row, col) order,
+    matching compute_expected()'s flattening."""
+    tiles_per_side = size // tile
+    matrix = [[0] * size for _ in range(size)]
+    idx = 0
+    for ti in range(tiles_per_side):
+        for tj in range(tiles_per_side):
+            for r in range(tile):
+                for c in range(tile):
+                    matrix[ti * tile + r][tj * tile + c] = values[idx]
+                    idx += 1
+    return [matrix[i][j] for i in range(size) for j in range(size)]
 
 
 def render_test_c(big_dim, A, B, out_path, template_path, template):
@@ -216,11 +237,19 @@ def run_one(big_dim, seed, low, high, cycles, template):
     actual = parse_dump_file(dump_path)
     expected = compute_expected(A, B, big_dim)
 
-    n = min(len(actual), len(expected))
     short = len(actual) < len(expected)
     if short:
         print(f"WARNING: dump only produced {len(actual)}/{len(expected)} words "
               f"(did it halt early / run out of cycles? cycles={actual_cycles})")
+    elif template == 2:
+        # Template 2's result buffer is tile-major (see matmul_template_2.c's
+        # header comment), not row-major -- de-tile before comparing against
+        # compute_expected()'s row-major flattening. Only safe on a
+        # full-length dump; a short/truncated one can't be meaningfully
+        # de-tiled, so it's left raw and will simply fail the diff below.
+        actual = detile_values(actual, big_dim)
+
+    n = min(len(actual), len(expected))
 
     mismatches = [(i, expected[i], actual[i]) for i in range(n) if expected[i] != actual[i]]
 

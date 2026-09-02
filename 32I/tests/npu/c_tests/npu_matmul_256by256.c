@@ -13,10 +13,11 @@ static inline void npu_write32(uint32_t addr, uint32_t val) {
     );
 }
 
-// Loads/stores a 16x16 tile between memory (base address, rows
-// row_stride_bytes apart -- the enclosing matrix's row width) and the
-// NPU's Matrix A/B/result windows via the custom-0 (opcode 0x0B) strided
-// tile-transfer instruction. Each call replaces what used to be a 256-word
+// Loads a 16x16 tile between memory and the NPU's Matrix A/B window via the
+// custom-0 (opcode 0x0B) tile-transfer instruction: reads 256 contiguous
+// words starting at src (row_stride_bytes is unused -- the caller must have
+// arranged the tile contiguously in memory beforehand, see
+// matmul_template_2.c). Each call replaces what used to be a 256-word
 // npu_write32/npu_move_word loop per tile.
 static inline void npu_load_a(const int32_t* src, uint32_t row_stride_bytes) {
     asm volatile (".insn r 0x0B, 0, 0, zero, %0, %1" : : "r"(src), "r"(row_stride_bytes) : "memory");
@@ -156,9 +157,12 @@ int main() {
             npu_write32(DIM_N_ADDR, N);
 
             for (uint32_t Kt = 0; Kt < TILES; Kt++) {
-                // Load A[I][Kt] and B[Kt][J] tiles straight out of the big
-                // matrices -- one instruction each, the row stride handles
-                // a tile's rows not being contiguous in memory.
+                // NOTE: A/B here are plain row-major, so this tile is NOT
+                // contiguous in memory -- npu_load_a/npu_load_b now read
+                // 256 contiguous words regardless of the stride argument,
+                // so this no longer extracts the correct tile for I,Kt (or
+                // Kt,J) other than the top-left one. See matmul_template_2.c
+                // for the tile-major layout this instruction actually needs.
                 npu_load_a(&A[(I * MAX_DIM) * BIG_DIM + Kt * MAX_DIM], ROW_STRIDE);
                 npu_load_b(&B[(Kt * MAX_DIM) * BIG_DIM + J * MAX_DIM], ROW_STRIDE);
 

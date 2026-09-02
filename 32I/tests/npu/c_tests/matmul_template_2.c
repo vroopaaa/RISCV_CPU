@@ -2,12 +2,14 @@
 // using the custom-0 (opcode 0x0B) tile-transfer instructions in place of
 // matmul_template.c's per-word npu_write32/npu_move_word loops.
 //
-// A and B are stored TILE-MAJOR (each 16x16 tile contiguous, tiles in
-// row-major grid order), not as plain row-major BIG_DIM x BIG_DIM arrays --
-// that lets npu_load_a/npu_load_b read a whole tile in one contiguous
-// access instead of 16 separate strided row reads. The result matrix is
-// still written out plain row-major (via a strided store) since nothing
-// downstream needs it tiled.
+// A, B, AND the result are all stored TILE-MAJOR (each 16x16 tile
+// contiguous, tiles in row-major grid order), not as plain row-major
+// BIG_DIM x BIG_DIM arrays -- that lets npu_load_a/npu_load_b/npu_store_c
+// each move a whole tile in one contiguous access instead of 16 separate
+// strided row accesses. This means the result region at RESULT_BASE_ADDR is
+// NOT a plain row-major matrix -- run_npu_tests.py de-tiles it back into
+// logical (row, col) order before comparing against its Python-computed
+// reference.
 //
 // The BIG_DIM/MATRIX_A_DATA/MATRIX_B_DATA placeholder tokens below (each
 // wrapped in double curly braces) are filled in by run_npu_tests.py, which
@@ -29,10 +31,9 @@ static inline void npu_write32(uint32_t addr, uint32_t val) {
 }
 
 // Loads a 16x16 tile stored CONTIGUOUSLY in memory (256 words starting at
-// src) into the NPU's Matrix A/B window -- a single contiguous access,
-// unlike npu_store_c below which still has to land into a strided,
-// row-major destination. Each call replaces what used to be a 256-word
-// npu_write32/npu_move_word loop per tile.
+// src) into the NPU's Matrix A/B window -- a single contiguous access.
+// Each call replaces what used to be a 256-word npu_write32/npu_move_word
+// loop per tile.
 static inline void npu_load_a(const int32_t* src) {
     asm volatile (".insn r 0x0B, 0, 0, zero, %0, %1" : : "r"(src), "r"(0) : "memory");
 }
@@ -41,12 +42,11 @@ static inline void npu_load_b(const int32_t* src) {
     asm volatile (".insn r 0x0B, 1, 0, zero, %0, %1" : : "r"(src), "r"(0) : "memory");
 }
 
-// Stores the NPU's 16x16 result tile into memory at dst, rows
-// row_stride_bytes apart -- the destination result matrix stays plain
-// row-major, so this side keeps the strided write.
-
-static inline void npu_store_c(int32_t* dst, uint32_t row_stride_bytes) {
-    asm volatile (".insn r 0x0B, 2, 0, zero, %0, %1" : : "r"(dst), "r"(row_stride_bytes) : "memory");
+// Stores the NPU's 16x16 result tile as 256 contiguous words at dst --
+// same single-access shape as the loads above, landing into the result
+// buffer's tile-major layout (see file header comment).
+static inline void npu_store_c(int32_t* dst) {
+    asm volatile (".insn r 0x0B, 2, 0, zero, %0, %1" : : "r"(dst), "r"(0) : "memory");
 }
 
 // Prints the n x n region of memory at src (e.g. the fully-assembled
@@ -82,9 +82,6 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 #define BIG_DIM       {{BIG_DIM}}U
 #define TILES         (BIG_DIM / MAX_DIM)
 #define TILE_WORDS    (MAX_DIM * MAX_DIM)
-// Only the result store still uses a row stride -- it's the one thing left
-// plain row-major (see file header comment).
-#define ROW_STRIDE    (BIG_DIM * sizeof(int32_t))
 
 // Fixed address (~800KB into the 1M RAM) instead of a stack-managed one, so
 // the result can be located and read back after the run via
@@ -127,13 +124,19 @@ int main() {
                 npu_write32(MAC_ADDR, 1);
             }
 
-            // K-loop finished: drain the completed 16x16 accumulator
-            // straight into the result matrix's (I,J) tile -- one
-            // instruction, same strided addressing as the loads above.
-            npu_store_c((int32_t*)(RESULT_BASE_ADDR + ((I * MAX_DIM) * BIG_DIM + J * MAX_DIM) * 4), ROW_STRIDE);
+            // K-loop finished: drain the completed 16x16 accumulator into
+            // the result buffer's (I,J) tile slot -- one contiguous access,
+            // same shape as the loads above. The result buffer is
+            // tile-major (see file header comment), not row-major.
+            npu_store_c((int32_t*)(RESULT_BASE_ADDR + (I * TILES + J) * TILE_WORDS * 4));
         }
     }
 
+    // NOTE: this prints the raw tile-major buffer as if it were a BIG_DIM x
+    // BIG_DIM row-major matrix, so for BIG_DIM > MAX_DIM the on-screen
+    // layout is scrambled -- it's just a quick "did anything come out"
+    // sanity view. run_npu_tests.py de-tiles the same buffer properly (via
+    // Memory::dump_range) for the actual correctness check.
     npu_print((int32_t*)RESULT_BASE_ADDR, BIG_DIM);
 
     return 0;
