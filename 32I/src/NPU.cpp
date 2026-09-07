@@ -66,7 +66,7 @@ uint32_t NPU::read(uint32_t address) {
 }
 
 void NPU::reset() {
-    M = K = N = 0;
+    // Clears the matrices
     done = false;
     for (uint32_t i = 0; i < 3 * MAX_DIM * MAX_DIM; i++)
         data[i] = 0;

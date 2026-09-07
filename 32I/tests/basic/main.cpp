@@ -23,15 +23,24 @@ int main(int argc, char* argv[]) {
     uint32_t dump_offset = DEFAULT_DUMP_OFFSET;
     std::string dump_file_path; // empty -> dump to stdout, same as before
     bool dump_requested = argc > 3; // only dump when a region was explicitly given
+    // Two new trailing args, both optional -- anything calling this with the
+    // original 5 args (make run-test, run_tests.py, emul) is unaffected and
+    // still runs the original single-instruction pipeline.
+    std::string mode = "scalar";  // "scalar" (default) or "superscalar"
+    int issue_width = 0;          // superscalar only; 0 => CPU's own default (MAX_ISSUE_WIDTH)
 
     if (argc > 1) bin_path = argv[1];
     if (argc > 2) num_cycles = std::atoi(argv[2]);
     if (argc > 3) dump_base = std::strtoul(argv[3], nullptr, 16);
     if (argc > 4) dump_offset = std::strtoul(argv[4], nullptr, 16);
     if (argc > 5) dump_file_path = argv[5];
+    if (argc > 6) mode = argv[6];
+    if (argc > 7) issue_width = std::atoi(argv[7]);
+    bool superscalar = (mode == "superscalar");
 
     std::cout << "Starting RISC-V CPU Emulator - Compiled C Program Test..." << std::endl;
-    std::cout << "Loading: " << bin_path << " | Cycles: " << num_cycles << std::endl;
+    std::cout << "Loading: " << bin_path << " | Cycles: " << num_cycles
+               << " | Mode: " << mode << std::endl;
 
     // 4MB: matches tests/python/link.ld's LENGTH = 4M (bumped from 1M so
     // larger NPU matmul tests' result region, at a fixed offset past the
@@ -44,17 +53,33 @@ int main(int argc, char* argv[]) {
     }
 
     CPU cpu(&memory);
+    if (superscalar && issue_width > 0) {
+        cpu.set_issue_width(issue_width);
+    }
 
     std::cout << "\n--- Initial State ---" << std::endl;
     cpu.print_state();
 
-    for (int i = 0; i < num_cycles; i++) {
-        cpu.fetch();
-        cpu.decode();
-        cpu.execute();
-        cpu.read();
-        cpu.writeback();
-        if (cpu.is_halted()) break; // program reached its `j _end` halt loop
+    if (superscalar) {
+        std::cout << "Superscalar issue width: " << cpu.issue_width() << std::endl;
+        for (int i = 0; i < num_cycles; i++) {
+            cpu.fetch_n();
+            cpu.decode_all();
+            cpu.hazard_scan();
+            cpu.execute_m();
+            cpu.read_m();
+            cpu.writeback_m();
+            if (cpu.is_halted()) break; // program reached its `j _end` halt loop
+        }
+    } else {
+        for (int i = 0; i < num_cycles; i++) {
+            cpu.fetch();
+            cpu.decode();
+            cpu.execute();
+            cpu.read();
+            cpu.writeback();
+            if (cpu.is_halted()) break; // program reached its `j _end` halt loop
+        }
     }
 
     std::cout << "\n--- Final State ---" << std::endl;

@@ -12,6 +12,14 @@ CPU::CPU(Memory* mem_ptr) {
     pc = 0;
     cycle_count = 0;
     halted = false;
+    issueWidth = MAX_ISSUE_WIDTH;
+    issueCount = 0;
+}
+
+void CPU::set_issue_width(int n) {
+    if (n < 1) n = 1;
+    if (n > MAX_ISSUE_WIDTH) n = MAX_ISSUE_WIDTH;
+    issueWidth = n;
 }
 
 // Enforces that register x0 is always hardwired to 0
@@ -473,5 +481,432 @@ void CPU::writeback() {
     enforce_zero_register();
     //update the pc
     pc = next_pc;
+    cycle_count++;
+}
+
+// =============================================================================
+// In-order superscalar issue -- see docs/superscalar.md for the design.
+// =============================================================================
+
+CPU::InstructionFields CPU::decode_one(reg_t word) const {
+    InstructionFields f;
+    f.opcode = word & 0x7F;
+    f.rd = (word >> 7) & 0x1F;
+    f.rs1 = (word >> 15) & 0x1F;
+    f.rs2 = (word >> 20) & 0x1F;
+    f.funct3 = (word >> 12) & 0x07;
+    f.funct7 = (word >> 25) & 0x7F;
+    f.imm_U = word & 0xFFFFF000;
+    f.imm_I = (uint32_t)((int32_t)word >> 20);
+    f.imm_S = (uint32_t)(
+        (((int32_t)word >> 20) & 0xFFFFFFE0) |
+        ((word >> 7) & 0x0000001F)
+    );
+    f.imm_B = (uint32_t)(
+        (((int32_t)word >> 19) & 0xFFFFF000) |
+        ((word << 4)  & 0x00000800) |
+        ((word >> 20) & 0x000007E0) |
+        ((word >> 7)  & 0x0000001E)
+    );
+    f.imm_J = (uint32_t)(
+        (((int32_t)word >> 11) & 0xFFF00000) |
+        (word & 0x000FF000) |
+        ((word >> 9)  & 0x00000800) |
+        ((word >> 20) & 0x000007FE)
+    );
+    f.imm_Z = (word >> 15) & 0x0000001F;
+    return f;
+}
+
+reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_next_pc, bool& out_next_pc_set) {
+    reg_t result = 0;
+    out_next_pc_set = false;
+    switch (f.opcode) {
+        case 0x13: {
+            switch (f.funct3) {
+                case 0x0: // ADDI
+                    result = registers[f.rs1] + f.imm_I;
+                    break;
+                case 0x2: // SLTI
+                    result = ((int32_t)registers[f.rs1] < (int32_t)f.imm_I) ? 1 : 0;
+                    break;
+                case 0x3: // SLTIU
+                    result = ((uint32_t)registers[f.rs1] < (uint32_t)f.imm_I) ? 1 : 0;
+                    break;
+                case 0x4: // XORI
+                    result = registers[f.rs1] ^ f.imm_I;
+                    break;
+                case 0x6: // ORI
+                    result = registers[f.rs1] | f.imm_I;
+                    break;
+                case 0x7: // ANDI
+                    result = registers[f.rs1] & f.imm_I;
+                    break;
+                case 0x1: // SLLI
+                    result = registers[f.rs1] << (f.imm_I & 0x1F);
+                    break;
+                case 0x5: // SRLI and SRAI
+                    if ((f.imm_I >> 10) & 0x1) {
+                        result = (int32_t)registers[f.rs1] >> (f.imm_I & 0x1F);
+                    } else {
+                        result = registers[f.rs1] >> (f.imm_I & 0x1F);
+                    }
+                    break;
+            }
+            break;
+        }
+        case 0x37: { // LUI
+            result = f.imm_U;
+            break;
+        }
+        case 0x17: { // AUIPC
+            result = slot_pc + f.imm_U;
+            break;
+        }
+        case 0x33: {
+            switch (f.funct7) {
+                case 0x00:
+                case 0x20:
+                    switch (f.funct3) {
+                        case 0x0: // ADD and SUB
+                            if (f.funct7 == 0x00) {
+                                result = registers[f.rs1] + registers[f.rs2];
+                            } else if (f.funct7 == 0x20) {
+                                result = registers[f.rs1] - registers[f.rs2];
+                            }
+                            break;
+                        case 0x1: // SLL
+                            result = registers[f.rs1] << (registers[f.rs2] & 0x1F);
+                            break;
+                        case 0x2: // SLT
+                            result = ((int32_t)registers[f.rs1] < (int32_t)registers[f.rs2]) ? 1 : 0;
+                            break;
+                        case 0x3: // SLTU
+                            result = ((uint32_t)registers[f.rs1] < (uint32_t)registers[f.rs2]) ? 1 : 0;
+                            break;
+                        case 0x4: // XOR
+                            result = registers[f.rs1] ^ registers[f.rs2];
+                            break;
+                        case 0x5: // SRL and SRA
+                            if (f.funct7 == 0x00) {
+                                result = registers[f.rs1] >> (registers[f.rs2] & 0x1F);
+                            } else if (f.funct7 == 0x20) {
+                                result = (int32_t)registers[f.rs1] >> (registers[f.rs2] & 0x1F);
+                            }
+                            break;
+                        case 0x6: // OR
+                            result = registers[f.rs1] | registers[f.rs2];
+                            break;
+                        case 0x7: // AND
+                            result = registers[f.rs1] & registers[f.rs2];
+                            break;
+                    }
+                    break;
+                case 0x01: {
+                    switch (f.funct3) {
+                        case 0x0: // MUL
+                            result = registers[f.rs1] * registers[f.rs2];
+                            break;
+                        case 0x1: // MULH
+                            result = ((int64_t)(int32_t)registers[f.rs1] * (int64_t)(int32_t)registers[f.rs2]) >> 32;
+                            break;
+                        case 0x2: // MULHSU
+                            result = ((int64_t)(int32_t)registers[f.rs1] * (uint64_t)(uint32_t)registers[f.rs2]) >> 32;
+                            break;
+                        case 0x3: // MULHU
+                            result = ((uint64_t)(uint32_t)registers[f.rs1] * (uint64_t)(uint32_t)registers[f.rs2]) >> 32;
+                            break;
+                        case 0x4: // DIV
+                            if (registers[f.rs2] == 0) {
+                                result = -1;
+                            } else if (registers[f.rs1] == 0x80000000 && (int32_t)registers[f.rs2] == -1) {
+                                result = 0x80000000;
+                            } else {
+                                result = (int32_t)registers[f.rs1] / (int32_t)registers[f.rs2];
+                            }
+                            break;
+                        case 0x5: // DIVU
+                            if (registers[f.rs2] == 0) {
+                                result = UINT32_MAX;
+                            } else {
+                                result = registers[f.rs1] / registers[f.rs2];
+                            }
+                            break;
+                        case 0x6: // REM
+                            if (registers[f.rs2] == 0) {
+                                result = registers[f.rs1];
+                            } else if (registers[f.rs1] == 0x80000000 && (int32_t)registers[f.rs2] == -1) {
+                                result = 0;
+                            } else {
+                                result = (int32_t)registers[f.rs1] % (int32_t)registers[f.rs2];
+                            }
+                            break;
+                        case 0x7: // REMU
+                            if (registers[f.rs2] == 0) {
+                                result = registers[f.rs1];
+                            } else {
+                                result = registers[f.rs1] % registers[f.rs2];
+                            }
+                    }
+                }
+            }
+            break;
+        }
+        case 0x03: { // Load address calc
+            result = registers[f.rs1] + f.imm_I;
+            break;
+        }
+        case 0x23: { // Store address calc
+            result = registers[f.rs1] + f.imm_S;
+            break;
+        }
+        case 0x63: { // Branch
+            bool branch_taken = false;
+            switch (f.funct3) {
+                case 0x0: branch_taken = (registers[f.rs1] == registers[f.rs2]); break;
+                case 0x1: branch_taken = (registers[f.rs1] != registers[f.rs2]); break;
+                case 0x4: branch_taken = ((int32_t)registers[f.rs1] < (int32_t)registers[f.rs2]); break;
+                case 0x5: branch_taken = ((int32_t)registers[f.rs1] >= (int32_t)registers[f.rs2]); break;
+                case 0x6: branch_taken = (registers[f.rs1] < registers[f.rs2]); break;
+                case 0x7: branch_taken = (registers[f.rs1] >= registers[f.rs2]); break;
+            }
+            if (branch_taken) {
+                out_next_pc = slot_pc + f.imm_B;
+                out_next_pc_set = true;
+            }
+            break;
+        }
+        case 0x6F: { // JAL
+            result = slot_pc + 4;
+            out_next_pc = slot_pc + f.imm_J;
+            out_next_pc_set = true;
+            break;
+        }
+        case 0x67: { // JALR
+            result = slot_pc + 4;
+            out_next_pc = (registers[f.rs1] + f.imm_I) & ~1;
+            out_next_pc_set = true;
+            break;
+        }
+        case 0x0B: { // Custom-0: NPU tile transfer / memory print
+            result = registers[f.rs1]; // base address, consumed by read_one()
+            break;
+        }
+    }
+    return result;
+}
+
+void CPU::read_one(const InstructionFields& f, reg_t aluResult, bool slot_mem_read_enable, bool slot_mem_write_enable, reg_t& out_memResult) {
+    if (slot_mem_read_enable) {
+        switch (f.funct3) {
+            case 0x0: out_memResult = (int32_t)(int8_t)memory->read_byte(aluResult); break;
+            case 0x1: out_memResult = (int32_t)(int16_t)memory->read_halfword(aluResult); break;
+            case 0x2: out_memResult = memory->read_word(aluResult); break;
+            case 0x4: out_memResult = memory->read_byte(aluResult); break;
+            case 0x5: out_memResult = memory->read_halfword(aluResult); break;
+        }
+    }
+
+    if (slot_mem_write_enable) {
+        switch (f.funct3) {
+            case 0x0: memory->write_byte(aluResult, registers[f.rs2] & 0xFF); break;
+            case 0x1: memory->write_halfword(aluResult, registers[f.rs2] & 0xFFFF); break;
+            case 0x2: memory->write_word(aluResult, registers[f.rs2]); break;
+        }
+    }
+
+    if (f.opcode == 0x0B) {
+        uint32_t base = aluResult;
+        uint32_t rs2_val = registers[f.rs2];
+        switch (f.funct3) {
+            case 0x0: // load Matrix A: memory -> NPU (tile is contiguous in memory)
+                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                    memory->write_word(NPU::MAT_A_ADDR + i * 4, memory->read_word(base + i * 4));
+                break;
+            case 0x1: // load Matrix B: memory -> NPU (tile is contiguous in memory)
+                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                    memory->write_word(NPU::MAT_B_ADDR + i * 4, memory->read_word(base + i * 4));
+                break;
+            case 0x2: // store Matrix C: NPU -> memory (rs2_val = row stride)
+                for (uint32_t row = 0; row < NPU::MAX_DIM; row++)
+                    for (uint32_t col = 0; col < NPU::MAX_DIM; col++)
+                        memory->write_word(base + row * rs2_val + col * 4,
+                                            memory->read_word(NPU::RESULT_ADDR + (row * NPU::MAX_DIM + col) * 4));
+                break;
+            case 0x3: // print NxN region of memory at base (rs2_val = N)
+                memory->print_matrix(base, rs2_val, rs2_val);
+                break;
+        }
+    }
+}
+
+bool CPU::is_branch_or_jump(uint8_t opcode) {
+    return opcode == 0x63 || opcode == 0x6F || opcode == 0x67;
+}
+
+CPU::MemClass CPU::mem_class(uint8_t opcode, uint8_t funct3) {
+    if (opcode == 0x23) return MEM_STORE; // scalar SW/SH/SB
+    if (opcode == 0x0B) {
+        switch (funct3) {
+            case 0x0: return MEM_BANK_A; // NPU load A
+            case 0x1: return MEM_BANK_B; // NPU load B
+            case 0x2: return MEM_STORE;  // NPU store C -- treated like any other store
+            default:  return MEM_NONE;   // funct3 3: debug memory print, never a hazard
+        }
+    }
+    return MEM_NONE;
+}
+
+void CPU::reg_usage(uint8_t opcode, uint8_t funct3, bool& uses_rs1, bool& uses_rs2) {
+    switch (opcode) {
+        case 0x13: // I-type ALU
+        case 0x03: // Loads
+        case 0x67: // JALR
+            uses_rs1 = true;  uses_rs2 = false; break;
+        case 0x33: // R-type ALU / M-extension
+        case 0x23: // Stores
+        case 0x63: // Branches
+            uses_rs1 = true;  uses_rs2 = true;  break;
+        case 0x37: // LUI
+        case 0x17: // AUIPC
+        case 0x6F: // JAL
+            uses_rs1 = false; uses_rs2 = false; break;
+        case 0x0B: // Custom-0: rs1 is always the base address; rs2 is only
+                   // meaningful for store-C (stride) and memory-print (N).
+            uses_rs1 = true;
+            uses_rs2 = (funct3 == 0x2 || funct3 == 0x3);
+            break;
+        default:
+            uses_rs1 = false; uses_rs2 = false; break;
+    }
+}
+
+void CPU::fetch_n() {
+    windowBasePC = pc;
+    for (int i = 0; i < issueWidth; i++) {
+        windowWords[i] = memory->read_word(pc + 4 * i);
+    }
+}
+
+void CPU::decode_all() {
+    for (int i = 0; i < issueWidth; i++) {
+        windowDecoded[i] = decode_one(windowWords[i]);
+        switch (windowDecoded[i].opcode) {
+            case 0x13: case 0x33: case 0x37: case 0x17: // ALU / LUI / AUIPC
+                windowMemRead[i]  = false;
+                windowMemWrite[i] = false;
+                windowRegWrite[i] = true;
+                break;
+            case 0x0B: // Custom-0: NPU tile transfer / memory print
+                windowMemRead[i]  = false;
+                windowMemWrite[i] = false;
+                windowRegWrite[i] = false;
+                break;
+            case 0x03: // Loads
+                windowMemRead[i]  = true;
+                windowMemWrite[i] = false;
+                windowRegWrite[i] = true;
+                break;
+            case 0x23: // Stores
+                windowMemRead[i]  = false;
+                windowMemWrite[i] = true;
+                windowRegWrite[i] = false;
+                break;
+            case 0x63: // Branches
+                windowMemRead[i]  = false;
+                windowMemWrite[i] = false;
+                windowRegWrite[i] = false;
+                break;
+            case 0x6F: case 0x67: // JAL / JALR
+                windowMemRead[i]  = false;
+                windowMemWrite[i] = false;
+                windowRegWrite[i] = true;
+                break;
+            default:
+                windowMemRead[i]  = false;
+                windowMemWrite[i] = false;
+                windowRegWrite[i] = false;
+                break;
+        }
+    }
+}
+
+// Scans the decoded window left to right, picking the largest prefix m that's
+// safe to issue together this cycle (docs/superscalar.md has the full rules).
+void CPU::hazard_scan() {
+    issueCount = issueWidth;
+    for (int i = 0; i < issueWidth; i++) {
+        const InstructionFields& fi = windowDecoded[i];
+        MemClass my_class = mem_class(fi.opcode, fi.funct3);
+
+        if (i > 0) {
+            bool uses_rs1, uses_rs2;
+            reg_usage(fi.opcode, fi.funct3, uses_rs1, uses_rs2);
+            bool raw_hazard = false;
+            for (int j = 0; j < i; j++) {
+                if (!windowRegWrite[j] || windowDecoded[j].rd == 0) continue;
+                uint8_t written_rd = windowDecoded[j].rd;
+                if ((uses_rs1 && fi.rs1 == written_rd) || (uses_rs2 && fi.rs2 == written_rd)) {
+                    raw_hazard = true;
+                    break;
+                }
+            }
+            if (raw_hazard) { issueCount = i; return; }
+
+            // Memory-port conflicts against every earlier slot: two
+            // instructions of the SAME MemClass conflict -- two stores
+            // (single write port), or two loads into the same NPU bank
+            // (that bank's single write port). A store and an NPU bank load
+            // are DIFFERENT classes and no longer conflict with each other:
+            // a bank load reads external memory and writes into the NPU's
+            // own internal SRAM, a store writes external memory -- separate
+            // read/write ports, so they don't contend for anything. Loads
+            // into DIFFERENT banks, or anything with MemClass::NONE
+            // (including non-memory instructions like ADDI/ADD), never
+            // conflict with anything.
+            if (my_class != MEM_NONE) {
+                bool mem_conflict = false;
+                for (int j = 0; j < i; j++) {
+                    MemClass other_class = mem_class(windowDecoded[j].opcode, windowDecoded[j].funct3);
+                    if (other_class == my_class) { mem_conflict = true; break; }
+                }
+                if (mem_conflict) { issueCount = i; return; }
+            }
+        }
+
+        if (is_branch_or_jump(fi.opcode)) { issueCount = i + 1; return; }
+    }
+}
+
+void CPU::execute_m() {
+    windowNextPC = windowBasePC + 4 * issueCount; // default fall-through, overridden below by a taken branch/jump
+    halted = false;
+    for (int i = 0; i < issueCount; i++) {
+        reg_t slot_pc = windowBasePC + 4 * i;
+        reg_t out_next_pc;
+        bool out_next_pc_set = false;
+        windowAluResult[i] = execute_one(windowDecoded[i], slot_pc, out_next_pc, out_next_pc_set);
+        if (out_next_pc_set) {
+            windowNextPC = out_next_pc;
+            if (out_next_pc == slot_pc) halted = true; // same halt idiom as execute()
+        }
+    }
+}
+
+void CPU::read_m() {
+    for (int i = 0; i < issueCount; i++) {
+        read_one(windowDecoded[i], windowAluResult[i], windowMemRead[i], windowMemWrite[i], windowMemResult[i]);
+    }
+}
+
+void CPU::writeback_m() {
+    // Committing 0..m-1 in order is what resolves WAW correctly.
+    for (int i = 0; i < issueCount; i++) {
+        if (windowRegWrite[i] && windowDecoded[i].rd) {
+            registers[windowDecoded[i].rd] = windowMemRead[i] ? windowMemResult[i] : windowAluResult[i];
+        }
+    }
+    enforce_zero_register();
+    pc = windowNextPC;
     cycle_count++;
 }

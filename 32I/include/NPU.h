@@ -18,7 +18,7 @@ public:
     static constexpr uint32_t DIM_N_ADDR      = NPU_BASE + 0x08;
     static constexpr uint32_t TRIGGER_ADDR    = NPU_BASE + 0x0C;
     static constexpr uint32_t MAC_ADDR        = NPU_BASE + 0x10; // triggers a MAC instead of a compute
-    static constexpr uint32_t RESET_ADDR      = NPU_BASE + 0x14;
+    static constexpr uint32_t RESET_ADDR      = NPU_BASE + 0x14; // clears A/B/C and done; leaves M/K/N alone (see reset())
     // bit0: DONE -- set once compute() finishes, cleared by a write to RESET_ADDR
     static constexpr uint32_t STATUS_ADDR     = NPU_BASE + 0x18;
     // Read-triggered: any read here dumps A/B/C to stdout; the returned value is unused
