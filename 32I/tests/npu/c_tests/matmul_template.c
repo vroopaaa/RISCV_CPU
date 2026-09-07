@@ -54,7 +54,7 @@ static inline void npu_move_word(uint32_t npu_addr, uint32_t mem_addr) {
 #define DIM_N_ADDR    (NPU_BASE + 0x08)
 #define TRIGGER_ADDR  (NPU_BASE + 0x0C)   // one-shot overwrite compute
 #define MAC_ADDR      (NPU_BASE + 0x10)   // accumulate compute
-#define RESET_ADDR    (NPU_BASE + 0x14)   // clears A/B/C AND dims AND done
+#define RESET_ADDR    (NPU_BASE + 0x14)   // clears A/B/C and done; leaves M/K/N alone
 #define STATUS_ADDR   (NPU_BASE + 0x18)
 #define PRINT_ADDR    (NPU_BASE + 0x1C)
 
@@ -93,16 +93,19 @@ static const int32_t B[BIG_DIM * BIG_DIM] = {
 int main() {
     const uint32_t M = MAX_DIM, K = MAX_DIM, N = MAX_DIM; // every tile is 16x16 here
 
+    // Every tile here is 16x16 (M=K=N=MAX_DIM), so the dims never actually
+    // change across the whole run -- set them once. reset() (see NPU.cpp)
+    // deliberately leaves M/K/N alone, only clearing A/B/C and `done`, so
+    // this doesn't need to be re-declared inside the tile loop.
+    npu_write32(DIM_M_ADDR, M);
+    npu_write32(DIM_K_ADDR, K);
+    npu_write32(DIM_N_ADDR, N);
+
     for (uint32_t I = 0; I < TILES; I++) {
         for (uint32_t J = 0; J < TILES; J++) {
 
             // Start each output tile with a clean accumulator.
-            // NOTE: RESET_ADDR clears M/K/N too, so they must be re-declared
-            // every time this is called -- not just once before the loop.
             npu_write32(RESET_ADDR, 1);
-            npu_write32(DIM_M_ADDR, M);
-            npu_write32(DIM_K_ADDR, K);
-            npu_write32(DIM_N_ADDR, N);
 
             for (uint32_t Kt = 0; Kt < TILES; Kt++) {
                 // Load A[I][Kt] tile (strided out of the BIG_DIM-wide big matrix)

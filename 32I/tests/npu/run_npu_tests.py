@@ -30,6 +30,15 @@ Usage:
   python3 run_npu_tests.py --low -100 --high 100     # override the random value range (default -10..10)
   python3 run_npu_tests.py --sizes 512 --cycles 5000000   # override the cycle budget if auto-estimate isn't enough
   python3 run_npu_tests.py --template 1              # use the original per-word MMIO template instead
+  python3 run_npu_tests.py --mode superscalar               # run the SAME correctness check through the
+                                                              # superscalar issue path (see ../../../docs/
+                                                              # superscalar.md) instead of the scalar pipeline --
+                                                              # exercises the NPU-specific hazard rules
+                                                              # (load_a/load_b/store_c co-issue) end to end,
+                                                              # not just the hazard-scan scheduling logic
+  python3 run_npu_tests.py --mode superscalar --issue-width 4   # pin the issue width (default: CPU's own max)
+  python3 run_npu_tests.py --opt O2                          # compile at -O2 instead of the default -O0
+  python3 run_npu_tests.py --opt O2 --mode superscalar --issue-width 4
 
 Sizes must be multiples of 16; anything else raises a ValueError for that
 size and moves on to the next. Exit code is 0 if everything passed, 1 if
@@ -64,10 +73,13 @@ HARNESS = os.path.join(PROJECT_ROOT, "build", "run_test")
 
 RISCV_CC = "riscv64-unknown-elf-gcc"
 RISCV_OBJCOPY = "riscv64-unknown-elf-objcopy"
+# Optimization level is now a per-call argument (see build_riscv_bin) --
+# these are just the flags that never change.
 RISCV_FLAGS = [
     "-march=rv32im", "-mabi=ilp32",
-    "-nostdlib", "-nostartfiles", "-ffreestanding", "-O0",
+    "-nostdlib", "-nostartfiles", "-ffreestanding",
 ]
+DEFAULT_OPT = "O0"
 
 MAX_DIM = 16
 # Must match matmul_template.c's RESULT_BASE_ADDR.
@@ -151,16 +163,23 @@ def render_test_c(big_dim, A, B, out_path, template_path, template):
         f.write(filled)
 
 
-def build_riscv_bin(c_path, name):
+def build_riscv_bin(c_path, name, opt=DEFAULT_OPT):
     elf_path = os.path.join(BUILD_DIR, name + ".elf")
     bin_path = os.path.join(BUILD_DIR, name + ".bin")
-    run([RISCV_CC, *RISCV_FLAGS, "-T", LINK_LD, "-o", elf_path, START_S, c_path])
+    run([RISCV_CC, *RISCV_FLAGS, f"-{opt}", "-T", LINK_LD, "-o", elf_path, START_S, c_path])
     run([RISCV_OBJCOPY, "-O", "binary", elf_path, bin_path])
     return bin_path
 
 
-def run_simulator(bin_path, cycles, dump_base, dump_size, dump_path):
-    run([HARNESS, bin_path, str(cycles), f"{dump_base:x}", f"{dump_size:x}", dump_path])
+def run_simulator(bin_path, cycles, dump_base, dump_size, dump_path, mode, issue_width):
+    """Returns the harness's own reported cycle count (from its Final State
+    dump), or None if it couldn't be found."""
+    cmd = [HARNESS, bin_path, str(cycles), f"{dump_base:x}", f"{dump_size:x}", dump_path]
+    if mode == "superscalar":
+        cmd += [mode, str(issue_width)]
+    result = run(cmd)
+    matches = re.findall(r"Cycles:\s*(\d+)", result.stdout)
+    return int(matches[-1]) if matches else None
 
 
 def parse_dump_file(path):
@@ -191,7 +210,7 @@ def compute_expected(A, B, size):
     return expected
 
 
-def run_one(big_dim, seed, low, high, cycles, template):
+def run_one(big_dim, seed, low, high, cycles, template, mode, issue_width, opt=DEFAULT_OPT):
     if big_dim % MAX_DIM != 0:
         raise ValueError(f"big_dim must be a multiple of {MAX_DIM}, got {big_dim}")
 
@@ -201,17 +220,20 @@ def run_one(big_dim, seed, low, high, cycles, template):
     A = generate_matrix(big_dim, low, high, rng)
     B = generate_matrix(big_dim, low, high, rng)
 
-    name = f"matmul_{big_dim}_t{template}"
+    name = f"matmul_{big_dim}_t{template}_{opt}"
     c_path = os.path.join(BUILD_DIR, name + ".c")
     render_test_c(big_dim, A, B, c_path, TEMPLATE_PATHS[template], template)
 
-    print(f"\n=== {big_dim}x{big_dim} (seed={seed}, template={template}) ===")
-    bin_path = build_riscv_bin(c_path, name)
+    mode_desc = mode if mode == "scalar" else f"{mode} (issue width {issue_width or 'default'})"
+    print(f"\n=== {big_dim}x{big_dim} (seed={seed}, template={template}, -{opt}, mode={mode_desc}) ===")
+    bin_path = build_riscv_bin(c_path, name, opt)
 
     dump_size = big_dim * big_dim * 4
     dump_path = os.path.join(BUILD_DIR, name + ".dump.txt")
     actual_cycles = cycles if cycles is not None else estimate_cycles(big_dim)
-    run_simulator(bin_path, actual_cycles, RESULT_BASE_ADDR, dump_size, dump_path)
+    ran_cycles = run_simulator(bin_path, actual_cycles, RESULT_BASE_ADDR, dump_size, dump_path, mode, issue_width)
+    if ran_cycles is not None:
+        print(f"  ran in {ran_cycles:,} cycles")
 
     actual = parse_dump_file(dump_path)
     expected = compute_expected(A, B, big_dim)
@@ -248,6 +270,14 @@ def main():
     parser.add_argument("--template", type=int, choices=sorted(TEMPLATE_PATHS), default=2,
                          help="Which matmul_template.c to use: 1 (per-word MMIO, original) or "
                               "2 (strided custom-0 tile transfer, default)")
+    parser.add_argument("--mode", choices=["scalar", "superscalar"], default="scalar",
+                         help="Run the emulator's scalar pipeline (default) or the superscalar "
+                              "issue path (see ../../../docs/superscalar.md)")
+    parser.add_argument("--issue-width", type=int, default=0,
+                         help="Superscalar fetch/issue window width (0 = CPU's own default). "
+                              "Ignored in scalar mode.")
+    parser.add_argument("--opt", choices=["O0", "O1", "O2", "O3", "Os", "Og", "Ofast"], default=DEFAULT_OPT,
+                         help=f"C compiler optimization level (default: {DEFAULT_OPT})")
     args = parser.parse_args()
 
     print("Building simulator test harness...")
@@ -256,7 +286,8 @@ def main():
     all_passed = True
     for big_dim in args.sizes:
         try:
-            passed = run_one(big_dim, args.seed, args.low, args.high, args.cycles, args.template)
+            passed = run_one(big_dim, args.seed, args.low, args.high, args.cycles, args.template,
+                              args.mode, args.issue_width, args.opt)
         except Exception as e:
             print(f"\n[{big_dim}x{big_dim}] Exception: {e}\n")
             passed = False
