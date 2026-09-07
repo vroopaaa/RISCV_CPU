@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# emul <32I|32IV> <file.c> [max_cycles] [-O<n>] [-mode scalar|superscalar] [-n <issue_width>]
+#
+# Cross-compiles a freestanding C file for the given ISA (rv32im, bare-metal,
+# using that ISA's tests/python/start.s + link.ld), runs it on that ISA's
+# emulator, and prints the resulting register state + cycle count.
+#
+# -mode superscalar runs it through 32I's in-order superscalar issue path
+# (fetch_n/decode_all/hazard_scan/execute_m/read_m/writeback_m) instead of
+# the normal single-instruction pipeline; -n sets the fetch/issue window
+# width (defaults to the CPU's own MAX_ISSUE_WIDTH). Only implemented for
+# 32I -- 32IV's CPU doesn't have the superscalar methods.
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+REPO_ROOT="$(dirname "$(dirname "$SCRIPT_PATH")")"
+
+usage() {
+    echo "Usage: emul <32I|32IV> <file.c> [max_cycles] [-O0|-O1|-O2|-O3|-Os|-Og|-Ofast] [-mode scalar|superscalar] [-n <issue_width>]" >&2
+    exit 1
+}
+
+[ $# -ge 2 ] || usage
+ISA="$1"; shift
+SRC_ARG="$1"; shift
+
+CYCLES=400000000
+OPT="-O0"
+MODE="scalar"
+WIDTH=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -O*) OPT="$1"; shift ;;
+        -mode) [ $# -ge 2 ] || usage; MODE="$2"; shift 2 ;;
+        -n) [ $# -ge 2 ] || usage; WIDTH="$2"; shift 2 ;;
+        *[!0-9]*|'') usage ;;
+        *) CYCLES="$1"; shift ;;
+    esac
+done
+
+case "$ISA" in
+    32I|32IV) ;;
+    *) echo "error: ISA must be 32I or 32IV, got '$ISA'" >&2; exit 1 ;;
+esac
+
+case "$MODE" in
+    scalar|superscalar) ;;
+    *) echo "error: -mode must be 'scalar' or 'superscalar', got '$MODE'" >&2; exit 1 ;;
+esac
+[ -z "${WIDTH##*[!0-9]*}" ] && { echo "error: -n must be a non-negative integer, got '$WIDTH'" >&2; exit 1; }
+if [ "$MODE" = "superscalar" ] && [ "$ISA" != "32I" ]; then
+    echo "error: -mode superscalar is only implemented for 32I (not $ISA)" >&2
+    exit 1
+fi
+
+ISA_DIR="$REPO_ROOT/$ISA"
+[ -d "$ISA_DIR" ] || { echo "error: $ISA_DIR not found" >&2; exit 1; }
+
+SRC="$(readlink -f "$SRC_ARG")"
+[ -f "$SRC" ] || { echo "error: no such file: $SRC_ARG" >&2; exit 1; }
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+# --- Cross-compile bare-metal for RV32IM ---
+riscv64-unknown-elf-gcc \
+    -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding "$OPT" \
+    -T "$ISA_DIR/tests/python/link.ld" \
+    -o "$WORKDIR/prog.elf" \
+    "$ISA_DIR/tests/python/start.s" "$SRC"
+riscv64-unknown-elf-objcopy -O binary "$WORKDIR/prog.elf" "$WORKDIR/prog.bin"
+
+# --- Build the emulator harness for this ISA ---
+HARNESS_SRCS=("$ISA_DIR/src/CPU.cpp" "$ISA_DIR/src/memory.cpp")
+if [ "$ISA" = "32IV" ]; then
+    HARNESS_SRCS+=("$ISA_DIR/src/CPU_Vector.cpp")
+fi
+if [ -f "$ISA_DIR/src/NPU.cpp" ]; then
+    HARNESS_SRCS+=("$ISA_DIR/src/NPU.cpp")
+fi
+if [ -f "$ISA_DIR/src/NPU_print.cpp" ]; then
+    HARNESS_SRCS+=("$ISA_DIR/src/NPU_print.cpp")
+fi
+HARNESS_SRCS+=("$ISA_DIR/tests/basic/main.cpp" "$ISA_DIR/tests/basic/loader.cpp")
+
+g++ -std=c++17 -Wall -Wextra -I"$ISA_DIR/include" -O2 \
+    -o "$WORKDIR/harness" "${HARNESS_SRCS[@]}"
+
+# --- Run ---
+# The harness's dump-region args (argv 3-5) sit positionally before
+# mode/issue-width -- pass harmless placeholders (no dump requested) to
+# reach them, same convention tests/basic/main.cpp itself documents.
+if [ "$MODE" = "superscalar" ]; then
+    "$WORKDIR/harness" "$WORKDIR/prog.bin" "$CYCLES" 0 0 "" "$MODE" "$WIDTH"
+else
+    "$WORKDIR/harness" "$WORKDIR/prog.bin" "$CYCLES"
+fi

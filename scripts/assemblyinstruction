@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# assemblyinstruction <file.c> [-save [name.txt]] [-trace [name.txt]] [-cycles N] [-O<n>] [-mode scalar|superscalar] [-n <issue_width>]
+#
+# Compiles a C file to RV32IM assembly (<name>.s) and an object file
+# (<name>.o) in the same directory as the source, then disassembles the
+# object file with `riscv64-unknown-elf-objdump -d` and prints the
+# instructions. With -save, also writes that disassembly to a text file in
+# the same directory (defaults to <source-basename>.txt if no name is given).
+#
+# -trace additionally cross-compiles the file bare-metal and actually RUNS
+# it on the 32I emulator, writing a cycle-by-cycle DYNAMIC execution trace
+# (every instruction in the order it was really executed, loops repeated as
+# many times as they really ran -- not the static listing above) to
+# <name>.trace.txt (or the given path). -cycles caps how long it'll run
+# before giving up on a program that never halts (default 20000000).
+# -trace always runs against 32I (it's the only tree with the halt-on-self-
+# jump idiom the tracer's stop condition relies on).
+#
+# -mode superscalar traces 32I's superscalar issue path instead of the
+# normal single-instruction pipeline (see docs/superscalar.md) -- every
+# instruction hazard_scan() issued together in one cycle is written to the
+# SAME trace line, instead of one line per instruction. -n sets the
+# fetch/issue window width (defaults to the CPU's own max). Both are only
+# meaningful together with -trace.
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+TRACE_ISA_DIR="$REPO_ROOT/32I"
+
+usage() {
+    echo "Usage: assemblyinstruction <file.c> [-save [name.txt]] [-trace [name.txt]] [-cycles N] [-O0|-O1|-O2|-O3|-Os|-Og|-Ofast] [-mode scalar|superscalar] [-n <issue_width>]" >&2
+    exit 1
+}
+
+[ $# -ge 1 ] || usage
+SRC_ARG="$1"
+shift
+
+SAVE=0
+SAVE_PATH=""
+TRACE=0
+TRACE_PATH=""
+CYCLES=20000000
+OPT="-O0"
+MODE="scalar"
+WIDTH=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -save)
+            SAVE=1
+            shift
+            if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+                SAVE_PATH="$1"
+                shift
+            fi
+            ;;
+        -trace)
+            TRACE=1
+            shift
+            if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+                TRACE_PATH="$1"
+                shift
+            fi
+            ;;
+        -cycles)
+            shift
+            [ $# -gt 0 ] || usage
+            CYCLES="$1"
+            shift
+            ;;
+        -O*)
+            OPT="$1"
+            shift
+            ;;
+        -mode)
+            shift
+            [ $# -gt 0 ] || usage
+            MODE="$1"
+            shift
+            ;;
+        -n)
+            shift
+            [ $# -gt 0 ] || usage
+            WIDTH="$1"
+            shift
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+case "$MODE" in
+    scalar|superscalar) ;;
+    *) echo "error: -mode must be 'scalar' or 'superscalar', got '$MODE'" >&2; exit 1 ;;
+esac
+[ -z "${WIDTH##*[!0-9]*}" ] && { echo "error: -n must be a non-negative integer, got '$WIDTH'" >&2; exit 1; }
+
+SRC="$(readlink -f "$SRC_ARG")"
+[ -f "$SRC" ] || { echo "error: no such file: $SRC_ARG" >&2; exit 1; }
+
+SRC_DIR="$(dirname "$SRC")"
+BASE="$(basename "$SRC")"
+NAME="${BASE%.*}"
+
+ASM_OUT="$SRC_DIR/$NAME.s"
+OBJ_OUT="$SRC_DIR/$NAME.o"
+
+CFLAGS=(-march=rv32im -mabi=ilp32 -ffreestanding "$OPT")
+
+riscv64-unknown-elf-gcc "${CFLAGS[@]}" -S "$SRC" -o "$ASM_OUT"
+riscv64-unknown-elf-gcc "${CFLAGS[@]}" -c "$SRC" -o "$OBJ_OUT"
+
+DISASM="$(riscv64-unknown-elf-objdump -d "$OBJ_OUT")"
+
+echo "$DISASM"
+
+if [ "$SAVE" -eq 1 ]; then
+    if [ -z "$SAVE_PATH" ]; then
+        SAVE_PATH="$NAME.txt"
+    fi
+    case "$SAVE_PATH" in
+        /*) ;;
+        *) SAVE_PATH="$SRC_DIR/$SAVE_PATH" ;;
+    esac
+    echo "$DISASM" > "$SAVE_PATH"
+    echo "Saved disassembly to $SAVE_PATH" >&2
+fi
+
+if [ "$TRACE" -eq 1 ]; then
+    [ -d "$TRACE_ISA_DIR" ] || { echo "error: $TRACE_ISA_DIR not found" >&2; exit 1; }
+
+    if [ -z "$TRACE_PATH" ]; then
+        TRACE_PATH="$NAME.trace.txt"
+    fi
+    case "$TRACE_PATH" in
+        /*) ;;
+        *) TRACE_PATH="$SRC_DIR/$TRACE_PATH" ;;
+    esac
+
+    WORKDIR="$(mktemp -d)"
+    trap 'rm -rf "$WORKDIR"' EXIT
+
+    # --- Cross-compile bare-metal for RV32IM (same shape as `emul 32I`) ---
+    riscv64-unknown-elf-gcc \
+        -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding "$OPT" \
+        -T "$TRACE_ISA_DIR/tests/python/link.ld" \
+        -o "$WORKDIR/prog.elf" \
+        "$TRACE_ISA_DIR/tests/python/start.s" "$SRC"
+    riscv64-unknown-elf-objcopy -O binary "$WORKDIR/prog.elf" "$WORKDIR/prog.bin"
+
+    # Disassemble the LINKED binary (not the standalone .o above) -- the
+    # tracer needs real absolute addresses to match the CPU's PC.
+    riscv64-unknown-elf-objdump -d "$WORKDIR/prog.elf" > "$WORKDIR/prog.dis.txt"
+
+    # --- Build the tracer harness against 32I's CPU/memory/NPU sources ---
+    HARNESS_SRCS=("$TRACE_ISA_DIR/src/CPU.cpp" "$TRACE_ISA_DIR/src/memory.cpp")
+    if [ -f "$TRACE_ISA_DIR/src/NPU.cpp" ]; then
+        HARNESS_SRCS+=("$TRACE_ISA_DIR/src/NPU.cpp")
+    fi
+    if [ -f "$TRACE_ISA_DIR/src/NPU_print.cpp" ]; then
+        HARNESS_SRCS+=("$TRACE_ISA_DIR/src/NPU_print.cpp")
+    fi
+
+    g++ -std=c++17 -Wall -Wextra -I"$TRACE_ISA_DIR/include" -O2 \
+        -o "$WORKDIR/tracer" "$SCRIPT_DIR/lib/trace_harness.cpp" "${HARNESS_SRCS[@]}"
+
+    "$WORKDIR/tracer" "$WORKDIR/prog.bin" "$WORKDIR/prog.dis.txt" "$TRACE_PATH" "$CYCLES" "$MODE" "$WIDTH"
+fi
