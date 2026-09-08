@@ -111,8 +111,8 @@ def generate_kt_loop_body(tiles, unroll):
     return "\n".join(lines)
 
 
-def render_test_c_unrolled(big_dim, A, B, unroll, out_path):
-    tiles = big_dim // MAX_DIM
+def render_test_c_unrolled(big_dim, tile_dim, A, B, unroll, out_path):
+    tiles = big_dim // tile_dim
     kt_body = generate_kt_loop_body(tiles, unroll if unroll > 0 else tiles)
 
     with open(TEMPLATE_PATH) as f:
@@ -121,8 +121,9 @@ def render_test_c_unrolled(big_dim, A, B, unroll, out_path):
     filled = (
         contents
         .replace("{{BIG_DIM}}", str(big_dim))
-        .replace("{{MATRIX_A_DATA}}", base.format_matrix_tiled_c(A, big_dim))
-        .replace("{{MATRIX_B_DATA}}", base.format_matrix_tiled_c(B, big_dim))
+        .replace("{{TILE_DIM}}", str(tile_dim))
+        .replace("{{MATRIX_A_DATA}}", base.format_matrix_tiled_c(A, big_dim, tile=tile_dim))
+        .replace("{{MATRIX_B_DATA}}", base.format_matrix_tiled_c(B, big_dim, tile=tile_dim))
         .replace("{{KT_LOOP_BODY}}", kt_body)
     )
 
@@ -130,9 +131,13 @@ def render_test_c_unrolled(big_dim, A, B, unroll, out_path):
         f.write(filled)
 
 
-def run_one(big_dim, seed, low, high, cycles, unroll, mode, issue_width, opt=base.DEFAULT_OPT):
-    if big_dim % MAX_DIM != 0:
-        raise ValueError(f"big_dim must be a multiple of {MAX_DIM}, got {big_dim}")
+def run_one(big_dim, seed, low, high, cycles, unroll, mode, issue_width,
+            opt=base.DEFAULT_OPT, tile_size=base.DEFAULT_TILE_SIZE, harness=None):
+    if big_dim % tile_size != 0:
+        raise ValueError(f"big_dim must be a multiple of {tile_size}, got {big_dim}")
+
+    if harness is None:
+        harness = base.build_harness(tile_size)
 
     os.makedirs(BUILD_DIR, exist_ok=True)
     rng = random.Random(seed)
@@ -140,21 +145,21 @@ def run_one(big_dim, seed, low, high, cycles, unroll, mode, issue_width, opt=bas
     A = base.generate_matrix(big_dim, low, high, rng)
     B = base.generate_matrix(big_dim, low, high, rng)
 
-    tiles = big_dim // MAX_DIM
+    tiles = big_dim // tile_size
     effective_unroll = unroll if unroll > 0 else tiles
     unroll_desc = "full" if effective_unroll >= tiles else str(effective_unroll)
-    name = f"matmul_{big_dim}_t2u_unroll{unroll_desc}_{opt}"
+    name = f"matmul_{big_dim}_t2u_s{tile_size}_unroll{unroll_desc}_{opt}"
     c_path = os.path.join(BUILD_DIR, name + ".c")
-    render_test_c_unrolled(big_dim, A, B, unroll, c_path)
+    render_test_c_unrolled(big_dim, tile_size, A, B, unroll, c_path)
 
     mode_desc = mode if mode == "scalar" else f"{mode} (issue width {issue_width or 'default'})"
-    print(f"\n=== {big_dim}x{big_dim} (seed={seed}, K-unroll={unroll_desc}/{tiles}, -{opt}, mode={mode_desc}) ===")
+    print(f"\n=== {big_dim}x{big_dim} (tile={tile_size}x{tile_size}, seed={seed}, K-unroll={unroll_desc}/{tiles}, -{opt}, mode={mode_desc}) ===")
     bin_path = base.build_riscv_bin(c_path, name, opt)
 
     dump_size = big_dim * big_dim * 4
     dump_path = os.path.join(BUILD_DIR, name + ".dump.txt")
-    actual_cycles = cycles if cycles is not None else base.estimate_cycles(big_dim)
-    ran_cycles = base.run_simulator(bin_path, actual_cycles, RESULT_BASE_ADDR, dump_size,
+    actual_cycles = cycles if cycles is not None else base.estimate_cycles(big_dim, tile_size)
+    ran_cycles = base.run_simulator(harness, bin_path, actual_cycles, RESULT_BASE_ADDR, dump_size,
                                      dump_path, mode, issue_width)
     if ran_cycles is not None:
         print(f"  ran in {ran_cycles:,} cycles")
@@ -185,7 +190,9 @@ def run_one(big_dim, seed, low, high, cycles, unroll, mode, issue_width, opt=bas
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sizes", type=int, nargs="+", default=[16, 32, 256],
-                         help="Square matrix sizes to test, each a multiple of 16 (default: 16 32 256)")
+                         help="Square matrix sizes to test, each a multiple of tile size (default: 16 32 256)")
+    parser.add_argument("--tile-size", type=int, default=base.DEFAULT_TILE_SIZE,
+                         help=f"NPU native tile dimension (default: {base.DEFAULT_TILE_SIZE}, e.g. 8, 16, 32, 64)")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed (default: random each run)")
     parser.add_argument("--low", type=int, default=-10, help="Minimum random element value")
     parser.add_argument("--high", type=int, default=10, help="Maximum random element value")
@@ -203,14 +210,15 @@ def main():
                          help=f"C compiler optimization level (default: {base.DEFAULT_OPT})")
     args = parser.parse_args()
 
-    print("Building simulator test harness...")
-    base.build_harness()
+    print(f"Building simulator test harness for tile size {args.tile_size}x{args.tile_size}...")
+    harness = base.build_harness(args.tile_size)
 
     all_passed = True
     for big_dim in args.sizes:
         try:
             passed = run_one(big_dim, args.seed, args.low, args.high, args.cycles,
-                              args.unroll, args.mode, args.issue_width, args.opt)
+                              args.unroll, args.mode, args.issue_width, args.opt,
+                              args.tile_size, harness)
         except Exception as e:
             print(f"\n[{big_dim}x{big_dim}] Exception: {e}\n")
             passed = False

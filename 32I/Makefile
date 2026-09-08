@@ -78,9 +78,13 @@ TEST_TARGET = $(BUILD_DIR)/run_test
 
 # Linked directly against CPU.cpp/memory.cpp/NPU.cpp -- NOT src/main.cpp,
 # since that already has its own main() and would clash with tests/basic/main.cpp
-$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp $(INC_DIR)/NPU.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(filter %.cpp,$^)
 	@echo "Test harness built! Run with: ./$(TEST_TARGET)"
+
+$(BUILD_DIR)/run_test_t%: $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp $(INC_DIR)/NPU.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DNPU_MAX_DIM=$* -o $@ $(filter %.cpp,$^)
+	@echo "Tile-$* test harness built! Run with: ./$@"
 
 run-test: $(TEST_DIR)/test.bin $(TEST_TARGET)
 	./$(TEST_TARGET)

@@ -81,7 +81,8 @@ RISCV_FLAGS = [
 ]
 DEFAULT_OPT = "O0"
 
-MAX_DIM = 16
+DEFAULT_TILE_SIZE = 16
+MAX_DIM = DEFAULT_TILE_SIZE  # for backward compatibility
 # Must match matmul_template.c's RESULT_BASE_ADDR.
 RESULT_BASE_ADDR = 0xC8000
 
@@ -95,9 +96,10 @@ _CALIBRATION_DIM = 32
 _CALIBRATION_CYCLES = 231482
 
 
-def estimate_cycles(big_dim):
-    ratio = (big_dim / _CALIBRATION_DIM) ** 3
-    return int(_CALIBRATION_CYCLES * ratio * 3) + 100000
+def estimate_cycles(big_dim, tile_dim=DEFAULT_TILE_SIZE):
+    tiles = big_dim // tile_dim
+    # ~50 cycles per tile operation with generous safety headroom
+    return int((tiles ** 3) * 50) + 500000
 
 
 def run(cmd, **kwargs):
@@ -111,10 +113,16 @@ def run(cmd, **kwargs):
     return result
 
 
-def build_harness():
-    run(["make", "build/run_test"], cwd=PROJECT_ROOT)
-    if not os.path.exists(HARNESS):
-        raise RuntimeError(f"Harness not found at {HARNESS} after build")
+def get_harness_path(tile_dim=DEFAULT_TILE_SIZE):
+    return os.path.join(PROJECT_ROOT, "build", f"run_test_t{tile_dim}")
+
+
+def build_harness(tile_dim=DEFAULT_TILE_SIZE):
+    harness_path = get_harness_path(tile_dim)
+    run(["make", f"build/run_test_t{tile_dim}"], cwd=PROJECT_ROOT)
+    if not os.path.exists(harness_path):
+        raise RuntimeError(f"Harness not found at {harness_path} after build")
+    return harness_path
 
 
 def generate_matrix(size, low, high, rng):
@@ -128,7 +136,7 @@ def format_matrix_c(matrix, size):
     return "\n".join(lines)
 
 
-def format_matrix_tiled_c(matrix, size, tile=MAX_DIM):
+def format_matrix_tiled_c(matrix, size, tile=DEFAULT_TILE_SIZE):
     """Same data as format_matrix_c, but reordered tile-major: each tile x
     tile block contiguous (row-major within the tile), tiles visited in
     row-major grid order. Matches matmul_template_2.c's A/B layout, which
@@ -144,17 +152,18 @@ def format_matrix_tiled_c(matrix, size, tile=MAX_DIM):
     return "\n".join(lines)
 
 
-def render_test_c(big_dim, A, B, out_path, template_path, template):
+def render_test_c(big_dim, tile_dim, A, B, out_path, template_path, template):
     with open(template_path) as f:
         contents = f.read()
 
     # Template 2's A/B are tile-major (see matmul_template_2.c's header
     # comment); template 1 still expects plain row-major.
-    formatter = format_matrix_tiled_c if template == 2 else format_matrix_c
+    formatter = (lambda m, sz: format_matrix_tiled_c(m, sz, tile=tile_dim)) if template == 2 else format_matrix_c
 
     filled = (
         contents
         .replace("{{BIG_DIM}}", str(big_dim))
+        .replace("{{TILE_DIM}}", str(tile_dim))
         .replace("{{MATRIX_A_DATA}}", formatter(A, big_dim))
         .replace("{{MATRIX_B_DATA}}", formatter(B, big_dim))
     )
@@ -171,10 +180,10 @@ def build_riscv_bin(c_path, name, opt=DEFAULT_OPT):
     return bin_path
 
 
-def run_simulator(bin_path, cycles, dump_base, dump_size, dump_path, mode, issue_width):
+def run_simulator(harness_path, bin_path, cycles, dump_base, dump_size, dump_path, mode, issue_width):
     """Returns the harness's own reported cycle count (from its Final State
     dump), or None if it couldn't be found."""
-    cmd = [HARNESS, bin_path, str(cycles), f"{dump_base:x}", f"{dump_size:x}", dump_path]
+    cmd = [harness_path, bin_path, str(cycles), f"{dump_base:x}", f"{dump_size:x}", dump_path]
     if mode == "superscalar":
         cmd += [mode, str(issue_width)]
     result = run(cmd)
@@ -210,9 +219,13 @@ def compute_expected(A, B, size):
     return expected
 
 
-def run_one(big_dim, seed, low, high, cycles, template, mode, issue_width, opt=DEFAULT_OPT):
-    if big_dim % MAX_DIM != 0:
-        raise ValueError(f"big_dim must be a multiple of {MAX_DIM}, got {big_dim}")
+def run_one(big_dim, seed, low, high, cycles, template, mode, issue_width, opt=DEFAULT_OPT,
+            tile_size=DEFAULT_TILE_SIZE, harness=None):
+    if big_dim % tile_size != 0:
+        raise ValueError(f"big_dim must be a multiple of {tile_size}, got {big_dim}")
+
+    if harness is None:
+        harness = build_harness(tile_size)
 
     os.makedirs(BUILD_DIR, exist_ok=True)
     rng = random.Random(seed)
@@ -220,18 +233,18 @@ def run_one(big_dim, seed, low, high, cycles, template, mode, issue_width, opt=D
     A = generate_matrix(big_dim, low, high, rng)
     B = generate_matrix(big_dim, low, high, rng)
 
-    name = f"matmul_{big_dim}_t{template}_{opt}"
+    name = f"matmul_{big_dim}_t{template}_s{tile_size}_{opt}"
     c_path = os.path.join(BUILD_DIR, name + ".c")
-    render_test_c(big_dim, A, B, c_path, TEMPLATE_PATHS[template], template)
+    render_test_c(big_dim, tile_size, A, B, c_path, TEMPLATE_PATHS[template], template)
 
     mode_desc = mode if mode == "scalar" else f"{mode} (issue width {issue_width or 'default'})"
-    print(f"\n=== {big_dim}x{big_dim} (seed={seed}, template={template}, -{opt}, mode={mode_desc}) ===")
+    print(f"\n=== {big_dim}x{big_dim} (tile={tile_size}x{tile_size}, seed={seed}, template={template}, -{opt}, mode={mode_desc}) ===")
     bin_path = build_riscv_bin(c_path, name, opt)
 
     dump_size = big_dim * big_dim * 4
     dump_path = os.path.join(BUILD_DIR, name + ".dump.txt")
-    actual_cycles = cycles if cycles is not None else estimate_cycles(big_dim)
-    ran_cycles = run_simulator(bin_path, actual_cycles, RESULT_BASE_ADDR, dump_size, dump_path, mode, issue_width)
+    actual_cycles = cycles if cycles is not None else estimate_cycles(big_dim, tile_size)
+    ran_cycles = run_simulator(harness, bin_path, actual_cycles, RESULT_BASE_ADDR, dump_size, dump_path, mode, issue_width)
     if ran_cycles is not None:
         print(f"  ran in {ran_cycles:,} cycles")
 
@@ -261,7 +274,9 @@ def run_one(big_dim, seed, low, high, cycles, template, mode, issue_width, opt=D
 def main():
     parser = argparse.ArgumentParser(description="Run NPU matmul tests against the emulator.")
     parser.add_argument("--sizes", type=int, nargs="+", default=[16, 32, 256],
-                         help="Square matrix sizes to test, each a multiple of 16 (default: 16 32 256)")
+                         help="Square matrix sizes to test, each a multiple of tile size (default: 16 32 256)")
+    parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE,
+                         help=f"NPU native tile dimension (default: {DEFAULT_TILE_SIZE}, e.g. 8, 16, 32, 64)")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed (default: random each run)")
     parser.add_argument("--low", type=int, default=-10, help="Minimum random element value")
     parser.add_argument("--high", type=int, default=10, help="Maximum random element value")
@@ -280,14 +295,14 @@ def main():
                          help=f"C compiler optimization level (default: {DEFAULT_OPT})")
     args = parser.parse_args()
 
-    print("Building simulator test harness...")
-    build_harness()
+    print(f"Building simulator test harness for tile size {args.tile_size}x{args.tile_size}...")
+    harness = build_harness(args.tile_size)
 
     all_passed = True
     for big_dim in args.sizes:
         try:
             passed = run_one(big_dim, args.seed, args.low, args.high, args.cycles, args.template,
-                              args.mode, args.issue_width, args.opt)
+                              args.mode, args.issue_width, args.opt, args.tile_size, harness)
         except Exception as e:
             print(f"\n[{big_dim}x{big_dim}] Exception: {e}\n")
             passed = False

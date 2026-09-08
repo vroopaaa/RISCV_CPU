@@ -121,12 +121,15 @@ int main(int argc, char* argv[]) {
             int m = cpu.last_issue_count();
             std::ostringstream line;
             for (int i = 0; i < m; i++) {
-                uint32_t slot_pc = base_pc + 4 * i;
+                uint32_t slot_pc = cpu.slot_pc(i);
                 auto it = dis_map.find(slot_pc);
                 std::string text = (it != dis_map.end()) ? it->second : "<unknown>";
                 if (i > 0) line << " | ";
                 line << "0x" << std::hex << slot_pc << std::dec << ": " << text
                      << npu_tag(cpu.issued_opcode(i), cpu.issued_funct3(i));
+                if (cpu.is_cancelled(i)) {
+                    line << " [SQUASHED]";
+                }
             }
             out << cycles << "\t0x" << std::hex << base_pc << std::dec << "\t" << m
                 << "\t" << line.str() << "\n";

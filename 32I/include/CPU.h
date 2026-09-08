@@ -49,15 +49,33 @@ private:
     static constexpr int MAX_ISSUE_WIDTH = 10;
     int issueWidth;                                    // n: configured fetch/issue window size, <= MAX_ISSUE_WIDTH
     int issueCount;                                     // m: instructions actually issued this cycle, set by hazard_scan()
+    int fetchCount;                                     // instructions fetched this cycle (<= issueWidth)
     reg_t windowBasePC;                                  // pc at the start of this cycle's window (== pc when fetch_n() runs)
     reg_t windowNextPC;                                   // next_pc decided by execute_m(), committed by writeback_m()
+    reg_t fetchNextPC;                                   // next PC after all fetched slots if no mispredict
     reg_t windowWords[MAX_ISSUE_WIDTH];                    // raw 32-bit words, filled by fetch_n()
+    reg_t windowSlotPC[MAX_ISSUE_WIDTH];                   // per-slot PC, filled by fetch_n()
+    bool windowIsBranch[MAX_ISSUE_WIDTH];                  // true if slot is conditional branch (0x63)
+    bool windowPredictedTaken[MAX_ISSUE_WIDTH];            // predicted taken/not-taken
+    reg_t windowPredictedTarget[MAX_ISSUE_WIDTH];          // predicted target PC
+    bool windowIsSpeculative[MAX_ISSUE_WIDTH];             // true if fetched downstream of a branch
+    bool windowCancelled[MAX_ISSUE_WIDTH];                 // true if squashed on misprediction
     InstructionFields windowDecoded[MAX_ISSUE_WIDTH];       // filled by decode_all()
     bool windowMemRead[MAX_ISSUE_WIDTH];                     // per-slot control signals, filled by decode_all()
     bool windowMemWrite[MAX_ISSUE_WIDTH];
     bool windowRegWrite[MAX_ISSUE_WIDTH];
     reg_t windowAluResult[MAX_ISSUE_WIDTH];                   // filled by execute_m()
     reg_t windowMemResult[MAX_ISSUE_WIDTH];                    // filled by read_m()
+
+    // Branch Target Buffer (BTB) & 2-bit saturating counter
+    struct BTBEntry {
+        reg_t target_pc;
+        uint8_t state; // 2-bit counter: 0=SNT, 1=WNT, 2=WT, 3=ST
+        bool valid;
+    };
+    static constexpr int BTB_SIZE = 128;
+    BTBEntry btb[BTB_SIZE];
+    size_t btb_hash(reg_t addr) const { return (addr >> 2) & (BTB_SIZE - 1); }
 
     // Per-instruction decode/execute/read, used only by the superscalar path
     // (duplicated from decode()/execute()/read(), not shared, so the
@@ -66,6 +84,8 @@ private:
     reg_t execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_next_pc, bool& out_next_pc_set);
     void read_one(const InstructionFields& f, reg_t aluResult, bool slot_mem_read_enable, bool slot_mem_write_enable, reg_t& out_memResult);
 
+    static bool is_branch(uint8_t opcode) { return opcode == 0x63; }
+    static bool is_jump(uint8_t opcode) { return opcode == 0x6F || opcode == 0x67; }
     static bool is_branch_or_jump(uint8_t opcode);
     // Memory-port class for hazard_scan()'s structural-hazard checks 
     enum MemClass { MEM_NONE, MEM_BANK_A, MEM_BANK_B, MEM_STORE };
@@ -100,6 +120,10 @@ public:
     // instructions in a trace.
     uint8_t issued_opcode(int slot) const { return windowDecoded[slot].opcode; }
     uint8_t issued_funct3(int slot) const { return windowDecoded[slot].funct3; }
+    reg_t slot_pc(int slot) const { return windowSlotPC[slot]; }
+    bool is_cancelled(int slot) const { return windowCancelled[slot]; }
+    bool is_speculative(int slot) const { return windowIsSpeculative[slot]; }
+    bool is_branch_slot(int slot) const { return windowIsBranch[slot]; }
     // Debugging method to print the CPU state
     void print_state();
     // True once execute()/execute_m() has seen a jump/branch that targets

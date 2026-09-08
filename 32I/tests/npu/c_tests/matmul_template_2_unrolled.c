@@ -50,7 +50,9 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 // ---------------------------------------------------------------------
 
 #define NPU_BASE      0x80000000U
-#define MAX_DIM       16U
+#ifndef MAX_DIM
+#define MAX_DIM       {{TILE_DIM}}U
+#endif
 
 #define DIM_M_ADDR    (NPU_BASE + 0x00)
 #define DIM_K_ADDR    (NPU_BASE + 0x04)

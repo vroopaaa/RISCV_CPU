@@ -62,7 +62,9 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 // ---------------------------------------------------------------------
 
 #define NPU_BASE      0x80000000U
-#define MAX_DIM       16U          // NPU's native tile size (16x16)
+#ifndef MAX_DIM
+#define MAX_DIM       {{TILE_DIM}}U          // NPU's native tile size
+#endif
 
 #define DIM_M_ADDR    (NPU_BASE + 0x00)
 #define DIM_K_ADDR    (NPU_BASE + 0x04)
@@ -74,9 +76,8 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 
 // ---------------------------------------------------------------------
 // Problem size: BIG_DIM x BIG_DIM * BIG_DIM x BIG_DIM -> BIG_DIM x BIG_DIM,
-// tiled as a (BIG_DIM/16) grid of 16x16 tiles. BIG_DIM must be a multiple
-// of MAX_DIM (16) -- run_npu_tests.py is responsible for only ever
-// generating multiples of 16 here.
+// tiled as a (BIG_DIM/MAX_DIM) grid of MAX_DIMxMAX_DIM tiles. BIG_DIM must be
+// a multiple of MAX_DIM.
 // ---------------------------------------------------------------------
 
 #define BIG_DIM       {{BIG_DIM}}U
@@ -103,9 +104,9 @@ static const int32_t B[BIG_DIM * BIG_DIM] = {
 };
 
 int main() {
-    const uint32_t M = MAX_DIM, K = MAX_DIM, N = MAX_DIM; // every tile is 16x16 here
+    const uint32_t M = MAX_DIM, K = MAX_DIM, N = MAX_DIM; // every tile is MAX_DIMxMAX_DIM here
 
-    // Every tile here is 16x16 (M=K=N=MAX_DIM), so the dims never actually
+    // Every tile here is MAX_DIMxMAX_DIM (M=K=N=MAX_DIM), so the dims never actually
     // change across the whole run -- set them once. reset() (see NPU.cpp)
     // deliberately leaves M/K/N alone, only clearing A/B/C and `done`, so
     // this doesn't need to be re-declared inside the tile loop.
@@ -121,8 +122,8 @@ int main() {
 
             for (uint32_t Kt = 0; Kt < TILES; Kt++) {
                 // Load A[I][Kt] and B[Kt][J] tiles straight out of the
-                // tile-major big matrices -- each tile is 256 contiguous
-                // words, so this is one single access, not 16 strided rows.
+                // tile-major big matrices -- each tile is TILE_WORDS contiguous
+                // words, so this is one single access, not strided rows.
                 npu_load_a(&A[(I * TILES + Kt) * TILE_WORDS]);
                 npu_load_b(&B[(Kt * TILES + J) * TILE_WORDS]);
 
@@ -130,7 +131,7 @@ int main() {
                 npu_write32(MAC_ADDR, 1);
             }
 
-            // K-loop finished: drain the completed 16x16 accumulator
+            // K-loop finished: drain the completed accumulator
             // straight into the result matrix's (I,J) tile -- one
             // instruction, same strided addressing as the loads above.
             npu_store_c((int32_t*)(RESULT_BASE_ADDR + ((I * MAX_DIM) * BIG_DIM + J * MAX_DIM) * 4), ROW_STRIDE);

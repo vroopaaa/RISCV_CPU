@@ -18,7 +18,7 @@ int main(int argc, char* argv[]) {
     // unrequested raw hex dump of an arbitrary region is no longer forced
     // on every run.
     std::string bin_path = "tests/basic/test.bin";
-    int num_cycles = 500;
+    long long num_cycles = 500;
     uint32_t dump_base = DEFAULT_DUMP_BASE;
     uint32_t dump_offset = DEFAULT_DUMP_OFFSET;
     std::string dump_file_path; // empty -> dump to stdout, same as before
@@ -30,7 +30,7 @@ int main(int argc, char* argv[]) {
     int issue_width = 0;          // superscalar only; 0 => CPU's own default (MAX_ISSUE_WIDTH)
 
     if (argc > 1) bin_path = argv[1];
-    if (argc > 2) num_cycles = std::atoi(argv[2]);
+    if (argc > 2) num_cycles = std::atoll(argv[2]);
     if (argc > 3) dump_base = std::strtoul(argv[3], nullptr, 16);
     if (argc > 4) dump_offset = std::strtoul(argv[4], nullptr, 16);
     if (argc > 5) dump_file_path = argv[5];
@@ -62,7 +62,7 @@ int main(int argc, char* argv[]) {
 
     if (superscalar) {
         std::cout << "Superscalar issue width: " << cpu.issue_width() << std::endl;
-        for (int i = 0; i < num_cycles; i++) {
+        for (long long i = 0; i < num_cycles; i++) {
             cpu.fetch_n();
             cpu.decode_all();
             cpu.hazard_scan();
@@ -72,7 +72,7 @@ int main(int argc, char* argv[]) {
             if (cpu.is_halted()) break; // program reached its `j _end` halt loop
         }
     } else {
-        for (int i = 0; i < num_cycles; i++) {
+        for (long long i = 0; i < num_cycles; i++) {
             cpu.fetch();
             cpu.decode();
             cpu.execute();

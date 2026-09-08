@@ -46,8 +46,9 @@ static inline void npu_move_word(uint32_t npu_addr, uint32_t mem_addr) {
 // NPU register map (matches NPU::write()/read() in NPU.cpp)
 // ---------------------------------------------------------------------
 
-#define NPU_BASE      0x80000000U
-#define MAX_DIM       16U          // NPU's native tile size (16x16)
+#ifndef MAX_DIM
+#define MAX_DIM       {{TILE_DIM}}U          // NPU's native tile size
+#endif
 
 #define DIM_M_ADDR    (NPU_BASE + 0x00)
 #define DIM_K_ADDR    (NPU_BASE + 0x04)

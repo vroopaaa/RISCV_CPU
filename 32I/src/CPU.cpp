@@ -14,6 +14,13 @@ CPU::CPU(Memory* mem_ptr) {
     halted = false;
     issueWidth = MAX_ISSUE_WIDTH;
     issueCount = 0;
+    fetchCount = 0;
+    fetchNextPC = 0;
+    for (int i = 0; i < BTB_SIZE; i++) {
+        btb[i].target_pc = 0;
+        btb[i].state = 0;
+        btb[i].valid = false;
+    }
 }
 
 void CPU::set_issue_width(int n) {
@@ -783,13 +790,57 @@ void CPU::reg_usage(uint8_t opcode, uint8_t funct3, bool& uses_rs1, bool& uses_r
 
 void CPU::fetch_n() {
     windowBasePC = pc;
-    for (int i = 0; i < issueWidth; i++) {
-        windowWords[i] = memory->read_word(pc + 4 * i);
+    reg_t fetch_pc = pc;
+    bool branch_seen_in_packet = false;
+    fetchCount = 0;
+
+    for (int slot = 0; slot < issueWidth; slot++) {
+        reg_t instruction_word = memory->read_word(fetch_pc);
+        windowWords[slot] = instruction_word;
+        windowSlotPC[slot] = fetch_pc;
+        windowIsSpeculative[slot] = branch_seen_in_packet;
+        windowCancelled[slot] = false;
+
+        uint8_t opcode = instruction_word & 0x7F;
+
+        if (is_branch(opcode)) {
+            windowIsBranch[slot] = true;
+            size_t idx = btb_hash(fetch_pc);
+            const BTBEntry& btb_entry = btb[idx];
+
+            if (btb_entry.valid && btb_entry.state >= 2) {
+                windowPredictedTaken[slot] = true;
+                windowPredictedTarget[slot] = btb_entry.target_pc;
+                fetch_pc = btb_entry.target_pc;
+            } else {
+                windowPredictedTaken[slot] = false;
+                windowPredictedTarget[slot] = fetch_pc + 4;
+                fetch_pc = fetch_pc + 4;
+            }
+            branch_seen_in_packet = true;
+        } else if (is_jump(opcode)) {
+            // No speculation across jumps: record slot and stop fetching further slots this cycle
+            windowIsBranch[slot] = false;
+            windowPredictedTaken[slot] = false;
+            windowPredictedTarget[slot] = 0;
+            fetch_pc = fetch_pc + 4;
+            fetchCount = slot + 1;
+            break;
+        } else {
+            windowIsBranch[slot] = false;
+            windowPredictedTaken[slot] = false;
+            windowPredictedTarget[slot] = 0;
+            fetch_pc = fetch_pc + 4;
+        }
+
+        fetchCount = slot + 1;
     }
+
+    fetchNextPC = fetch_pc;
 }
 
 void CPU::decode_all() {
-    for (int i = 0; i < issueWidth; i++) {
+    for (int i = 0; i < fetchCount; i++) {
         windowDecoded[i] = decode_one(windowWords[i]);
         switch (windowDecoded[i].opcode) {
             case 0x13: case 0x33: case 0x37: case 0x17: // ALU / LUI / AUIPC
@@ -834,8 +885,8 @@ void CPU::decode_all() {
 // Scans the decoded window left to right, picking the largest prefix m that's
 // safe to issue together this cycle (docs/superscalar.md has the full rules).
 void CPU::hazard_scan() {
-    issueCount = issueWidth;
-    for (int i = 0; i < issueWidth; i++) {
+    issueCount = fetchCount;
+    for (int i = 0; i < fetchCount; i++) {
         const InstructionFields& fi = windowDecoded[i];
         MemClass my_class = mem_class(fi.opcode, fi.funct3);
 
@@ -874,27 +925,98 @@ void CPU::hazard_scan() {
             }
         }
 
-        if (is_branch_or_jump(fi.opcode)) { issueCount = i + 1; return; }
+        // Only non-speculated jumps truncate the window; branches do not truncate.
+        if (is_jump(fi.opcode)) { issueCount = i + 1; return; }
     }
 }
 
 void CPU::execute_m() {
-    windowNextPC = windowBasePC + 4 * issueCount; // default fall-through, overridden below by a taken branch/jump
+    bool misprediction_found = false;
+    reg_t recovery_pc = 0;
     halted = false;
+
     for (int i = 0; i < issueCount; i++) {
-        reg_t slot_pc = windowBasePC + 4 * i;
-        reg_t out_next_pc;
-        bool out_next_pc_set = false;
-        windowAluResult[i] = execute_one(windowDecoded[i], slot_pc, out_next_pc, out_next_pc_set);
-        if (out_next_pc_set) {
-            windowNextPC = out_next_pc;
-            if (out_next_pc == slot_pc) halted = true; // same halt idiom as execute()
+        windowCancelled[i] = false;
+    }
+
+    for (int i = 0; i < issueCount; i++) {
+        reg_t slot_pc = windowSlotPC[i];
+        const InstructionFields& fi = windowDecoded[i];
+
+        if (fi.opcode == 0x63) { // Branch
+            bool actual_taken = false;
+            switch (fi.funct3) {
+                case 0x0: actual_taken = (registers[fi.rs1] == registers[fi.rs2]); break; // BEQ
+                case 0x1: actual_taken = (registers[fi.rs1] != registers[fi.rs2]); break; // BNE
+                case 0x4: actual_taken = ((int32_t)registers[fi.rs1] < (int32_t)registers[fi.rs2]); break; // BLT
+                case 0x5: actual_taken = ((int32_t)registers[fi.rs1] >= (int32_t)registers[fi.rs2]); break; // BGE
+                case 0x6: actual_taken = (registers[fi.rs1] < registers[fi.rs2]); break; // BLTU
+                case 0x7: actual_taken = (registers[fi.rs1] >= registers[fi.rs2]); break; // BGEU
+            }
+            reg_t actual_target = slot_pc + fi.imm_B;
+            reg_t correct_path = actual_taken ? actual_target : (slot_pc + 4);
+
+            bool mispredicted = (actual_taken != windowPredictedTaken[i]) ||
+                               (actual_taken && (windowPredictedTarget[i] != actual_target));
+
+            // Update Predictor Table
+            size_t btb_idx = btb_hash(slot_pc);
+            btb[btb_idx].valid = true;
+            btb[btb_idx].target_pc = actual_target;
+            if (actual_taken) {
+                if (btb[btb_idx].state < 3) btb[btb_idx].state++;
+            } else {
+                if (btb[btb_idx].state > 0) btb[btb_idx].state--;
+            }
+
+            if (actual_taken && actual_target == slot_pc) {
+                halted = true;
+            }
+
+            if (mispredicted) {
+                misprediction_found = true;
+                recovery_pc = correct_path;
+
+                // Pipeline Squash on Mispredict: squash only instructions issued after this branch in the current window
+                for (int tail = i + 1; tail < issueCount; tail++) {
+                    windowCancelled[tail] = true;
+                    windowRegWrite[tail] = false;
+                    windowMemWrite[tail] = false;
+                    windowMemRead[tail] = false;
+                }
+                break;
+            }
+        } else {
+            reg_t out_next_pc;
+            bool out_next_pc_set = false;
+            windowAluResult[i] = execute_one(fi, slot_pc, out_next_pc, out_next_pc_set);
+            if (out_next_pc_set) {
+                // Jump (JAL / JALR)
+                windowNextPC = out_next_pc;
+                if (out_next_pc == slot_pc) halted = true; // same halt idiom as execute()
+            }
+        }
+    }
+
+    if (misprediction_found) {
+        windowNextPC = recovery_pc;
+    } else if (!halted) {
+        // If a jump did not set windowNextPC, advance to the first unissued instruction
+        // or to fetchNextPC if all fetched instructions were issued.
+        bool ended_with_jump = (issueCount > 0 && is_jump(windowDecoded[issueCount - 1].opcode));
+        if (!ended_with_jump) {
+            if (issueCount < fetchCount) {
+                windowNextPC = windowSlotPC[issueCount];
+            } else {
+                windowNextPC = fetchNextPC;
+            }
         }
     }
 }
 
 void CPU::read_m() {
     for (int i = 0; i < issueCount; i++) {
+        if (windowCancelled[i]) continue;
         read_one(windowDecoded[i], windowAluResult[i], windowMemRead[i], windowMemWrite[i], windowMemResult[i]);
     }
 }
@@ -902,6 +1024,7 @@ void CPU::read_m() {
 void CPU::writeback_m() {
     // Committing 0..m-1 in order is what resolves WAW correctly.
     for (int i = 0; i < issueCount; i++) {
+        if (windowCancelled[i]) continue;
         if (windowRegWrite[i] && windowDecoded[i].rd) {
             registers[windowDecoded[i].rd] = windowMemRead[i] ? windowMemResult[i] : windowAluResult[i];
         }

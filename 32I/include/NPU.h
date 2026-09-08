@@ -11,7 +11,10 @@ public:
     void print_matrices() const;
 
     static constexpr uint32_t NPU_BASE        = 0x80000000;
-    static constexpr uint32_t MAX_DIM         = 16;
+#ifndef NPU_MAX_DIM
+#define NPU_MAX_DIM 16
+#endif
+    static constexpr uint32_t MAX_DIM         = NPU_MAX_DIM;
 
     static constexpr uint32_t DIM_M_ADDR      = NPU_BASE + 0x00;
     static constexpr uint32_t DIM_K_ADDR      = NPU_BASE + 0x04;

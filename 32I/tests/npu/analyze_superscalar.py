@@ -73,15 +73,27 @@ def run(cmd, **kwargs):
     return result
 
 
-def build_tracer(workdir):
-    tracer_path = os.path.join(workdir, "tracer")
+def detect_tile_size(src_path):
+    try:
+        with open(src_path) as f:
+            content = f.read()
+        m = re.search(r"#define\s+MAX_DIM\s+(\d+)U", content)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 16
+
+
+def build_tracer(workdir, tile_dim=16):
+    tracer_path = os.path.join(workdir, f"tracer_t{tile_dim}")
     srcs = [TRACE_HARNESS_SRC]
     for name in ("CPU.cpp", "memory.cpp", "NPU.cpp", "NPU_print.cpp"):
         path = os.path.join(ISA_DIR, "src", name)
         if os.path.exists(path):
             srcs.append(path)
     run(["g++", "-std=c++17", "-Wall", "-Wextra", "-I", os.path.join(ISA_DIR, "include"),
-         "-O2", "-o", tracer_path] + srcs)
+         f"-DNPU_MAX_DIM={tile_dim}", "-O2", "-o", tracer_path] + srcs)
     return tracer_path
 
 
@@ -133,13 +145,15 @@ def parse_superscalar_trace(path):
     return cycles, instructions, hist
 
 
-def analyze(src, opts, max_n, cycles_cap, keep_traces, dest_name):
+def analyze(src, opts, max_n, cycles_cap, keep_traces, dest_name, tile_size=None):
+    if tile_size is None:
+        tile_size = detect_tile_size(src)
     all_halted = True
     report = {}  # opt -> {"total_instr": int, "runs": {label: {...}}}
 
     with tempfile.TemporaryDirectory() as workdir:
-        print("Building tracer...", file=sys.stderr)
-        tracer_path = build_tracer(workdir)
+        print(f"Building tracer (tile={tile_size}x{tile_size})...", file=sys.stderr)
+        tracer_path = build_tracer(workdir, tile_dim=tile_size)
 
         for opt in opts:
             print(f"Compiling at -{opt}...", file=sys.stderr)
@@ -238,6 +252,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--src", default=os.path.join(BUILD_DIR, "matmul_256_t2.c"),
                          help="bare-metal C source to analyze (default: build/matmul_256_t2.c)")
+    parser.add_argument("--tile-size", type=int, default=None,
+                         help="NPU native tile dimension (default: auto-detect from src or 16)")
     parser.add_argument("--opts", nargs="+", default=DEFAULT_OPTS,
                          help="optimization levels to sweep, e.g. O0 O1 O2 O3 (default: all four)")
     parser.add_argument("--max-n", type=int, default=DEFAULT_MAX_N,
@@ -256,7 +272,8 @@ def main():
     dest_name = os.path.splitext(os.path.basename(src))[0]
 
     report, all_halted = analyze(src, args.opts, args.max_n, args.cycles,
-                                  keep_traces=not args.no_keep_traces, dest_name=dest_name)
+                                  keep_traces=not args.no_keep_traces, dest_name=dest_name,
+                                  tile_size=args.tile_size)
     print_report(report, args.max_n)
 
     if args.json:
