@@ -29,11 +29,11 @@ static inline void npu_write32(uint32_t addr, uint32_t val) {
     );
 }
 
-static inline void npu_load_a(const int32_t* src) {
+static inline void npu_load_a(const int8_t* src) {
     asm volatile (".insn r 0x0B, 0, 0, zero, %0, %1" : : "r"(src), "r"(0) : "memory");
 }
 
-static inline void npu_load_b(const int32_t* src) {
+static inline void npu_load_b(const int8_t* src) {
     asm volatile (".insn r 0x0B, 1, 0, zero, %0, %1" : : "r"(src), "r"(0) : "memory");
 }
 
@@ -64,16 +64,16 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 
 #define BIG_DIM       {{BIG_DIM}}U
 #define TILES         (BIG_DIM / MAX_DIM)
-#define TILE_WORDS    (MAX_DIM * MAX_DIM)
+#define TILE_ELEMS    (MAX_DIM * MAX_DIM)
 #define ROW_STRIDE    (BIG_DIM * sizeof(int32_t))
 
 #define RESULT_BASE_ADDR 0xC8000U
 
-static const int32_t A[BIG_DIM * BIG_DIM] = {
+static const int8_t A[BIG_DIM * BIG_DIM] __attribute__((aligned(4))) = {
 {{MATRIX_A_DATA}}
 };
 
-static const int32_t B[BIG_DIM * BIG_DIM] = {
+static const int8_t B[BIG_DIM * BIG_DIM] __attribute__((aligned(4))) = {
 {{MATRIX_B_DATA}}
 };
 

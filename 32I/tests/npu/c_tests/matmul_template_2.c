@@ -28,16 +28,16 @@ static inline void npu_write32(uint32_t addr, uint32_t val) {
     );
 }
 
-// Loads a 16x16 tile stored CONTIGUOUSLY in memory (256 words starting at
-// src) into the NPU's Matrix A/B window -- a single contiguous access,
+// Loads a 16x16 int8 tile stored CONTIGUOUSLY in memory (256 bytes starting
+// at src) into the NPU's Matrix A/B window -- a single contiguous access,
 // unlike npu_store_c below which still has to land into a strided,
-// row-major destination. Each call replaces what used to be a 256-word
+// row-major destination. Each call replaces what used to be a per-word
 // npu_write32/npu_move_word loop per tile.
-static inline void npu_load_a(const int32_t* src) {
+static inline void npu_load_a(const int8_t* src) {
     asm volatile (".insn r 0x0B, 0, 0, zero, %0, %1" : : "r"(src), "r"(0) : "memory");
 }
 
-static inline void npu_load_b(const int32_t* src) {
+static inline void npu_load_b(const int8_t* src) {
     asm volatile (".insn r 0x0B, 1, 0, zero, %0, %1" : : "r"(src), "r"(0) : "memory");
 }
 
@@ -82,9 +82,9 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 
 #define BIG_DIM       {{BIG_DIM}}U
 #define TILES         (BIG_DIM / MAX_DIM)
-#define TILE_WORDS    (MAX_DIM * MAX_DIM)
+#define TILE_ELEMS    (MAX_DIM * MAX_DIM)
 // Only the result store still uses a row stride -- it's the one thing left
-// plain row-major (see file header comment).
+// plain row-major (see file header comment). C is int32, so 4 bytes/element.
 #define ROW_STRIDE    (BIG_DIM * sizeof(int32_t))
 
 // Fixed address (~800KB into the 1M RAM) instead of a stack-managed one, so
@@ -93,13 +93,14 @@ static inline void npu_print(const int32_t* src, uint32_t n) {
 #define RESULT_BASE_ADDR 0xC8000U
 
 // Tile-major: tile (row, col) of the logical BIG_DIM x BIG_DIM matrix lives
-// at [(row * TILES + col) * TILE_WORDS, ...), 256 contiguous elements,
-// row-major within the tile. Filled in by run_npu_tests.py in this order.
-static const int32_t A[BIG_DIM * BIG_DIM] = {
+// at [(row * TILES + col) * TILE_ELEMS, ...), 256 contiguous int8 elements,
+// row-major within the tile. A/B are int8; the result C is int32. Filled in
+// by run_npu_tests.py in this order.
+static const int8_t A[BIG_DIM * BIG_DIM] __attribute__((aligned(4))) = {
 {{MATRIX_A_DATA}}
 };
 
-static const int32_t B[BIG_DIM * BIG_DIM] = {
+static const int8_t B[BIG_DIM * BIG_DIM] __attribute__((aligned(4))) = {
 {{MATRIX_B_DATA}}
 };
 
@@ -122,10 +123,10 @@ int main() {
 
             for (uint32_t Kt = 0; Kt < TILES; Kt++) {
                 // Load A[I][Kt] and B[Kt][J] tiles straight out of the
-                // tile-major big matrices -- each tile is TILE_WORDS contiguous
-                // words, so this is one single access, not strided rows.
-                npu_load_a(&A[(I * TILES + Kt) * TILE_WORDS]);
-                npu_load_b(&B[(Kt * TILES + J) * TILE_WORDS]);
+                // tile-major big matrices -- each tile is TILE_ELEMS contiguous
+                // int8 elements, so this is one single access, not strided rows.
+                npu_load_a(&A[(I * TILES + Kt) * TILE_ELEMS]);
+                npu_load_b(&B[(Kt * TILES + J) * TILE_ELEMS]);
 
                 // Accumulate this K-slice's contribution on-chip.
                 npu_write32(MAC_ADDR, 1);

@@ -55,13 +55,13 @@ RESULT_BASE_ADDR = base.RESULT_BASE_ADDR
 
 
 def generate_kt_loop_body(tiles, unroll):
-    """C source for the K-tile loop body (I, J, A, B, TILES, TILE_WORDS all
+    """C source for the K-tile loop body (I, J, A, B, TILES, TILE_ELEMS all
     in scope from the surrounding template), unrolled by `unroll`. A
     trailing remainder loop covers any leftover K-tiles if `tiles` isn't
     evenly divisible by `unroll`.
 
-    Each unrolled block uses INCREMENTAL pointers (pA += TILE_WORDS,
-    pB += TILES * TILE_WORDS) rather than recomputing an absolute address
+    Each unrolled block uses INCREMENTAL pointers (pA += TILE_ELEMS,
+    pB += TILES * TILE_ELEMS) rather than recomputing an absolute address
     from a literal Kt each time. The first version of this unroller did the
     latter, and it backfired: with Kt as a compile-time constant, -O2 had to
     rebuild each tile's full address from scratch (a `lui`+`add` pair, the
@@ -78,12 +78,12 @@ def generate_kt_loop_body(tiles, unroll):
 
     def emit_incremental_block(count, kt_start_expr):
         lines.append(f"            {{")
-        lines.append(f"                const int32_t* pA = &A[(I * TILES + ({kt_start_expr})) * TILE_WORDS];")
-        lines.append(f"                const int32_t* pB = &B[(({kt_start_expr}) * TILES + J) * TILE_WORDS];")
+        lines.append(f"                const int8_t* pA = &A[(I * TILES + ({kt_start_expr})) * TILE_ELEMS];")
+        lines.append(f"                const int8_t* pB = &B[(({kt_start_expr}) * TILES + J) * TILE_ELEMS];")
         for i in range(count):
             if i > 0:
-                lines.append(f"                pA += TILE_WORDS;")
-                lines.append(f"                pB += TILES * TILE_WORDS;")
+                lines.append(f"                pA += TILE_ELEMS;")
+                lines.append(f"                pB += TILES * TILE_ELEMS;")
             lines.append(f"                npu_load_a(pA);")
             lines.append(f"                npu_load_b(pB);")
             lines.append(f"                npu_write32(MAC_ADDR, 1);")
@@ -91,8 +91,8 @@ def generate_kt_loop_body(tiles, unroll):
 
     if unroll == 1:
         lines.append(f"            for (uint32_t Kt = 0; Kt < {full_span}; Kt++) {{")
-        lines.append(f"                npu_load_a(&A[(I * TILES + Kt) * TILE_WORDS]);")
-        lines.append(f"                npu_load_b(&B[(Kt * TILES + J) * TILE_WORDS]);")
+        lines.append(f"                npu_load_a(&A[(I * TILES + Kt) * TILE_ELEMS]);")
+        lines.append(f"                npu_load_b(&B[(Kt * TILES + J) * TILE_ELEMS]);")
         lines.append(f"                npu_write32(MAC_ADDR, 1);")
         lines.append(f"            }}")
     elif full_span == unroll:

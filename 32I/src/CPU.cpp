@@ -437,14 +437,16 @@ void CPU::read() {
     // Custom-0 (opcode 0x0B): NPU tile transfer (funct3 0/1/2) or a general
     // memory print (funct3 3). rs1 = base address.
     //
-    // funct3 0/1 (loads) read the source tile as one contiguous 256-word
-    // block -- the caller is responsible for laying tiles out contiguously
-    // in memory ahead of time, so this is a single access rather than 16
+    // funct3 0/1 (loads) read the source tile as one contiguous block of
+    // int8 elements (MAX_DIM*MAX_DIM bytes, i.e. 64 words for a 16x16 tile)
+    // -- the caller is responsible for laying tiles out contiguously in
+    // memory ahead of time, so this is a single access rather than 16
     // separate strided row reads. rs2 is unused here.
     //
     // funct3 2 (store) still writes strided, since the destination is a
     // plain row-major matrix (rows are BIG_DIM apart, not tile-contiguous):
-    // rs2 = row stride in bytes.
+    // rs2 = row stride in bytes. C stays int32 (the accumulator), unlike the
+    // int8 A/B loads above.
     //
     // funct3 3 prints an NxN region (rs2 = N) via Memory::print_matrix,
     // unrelated to the NPU -- just a general "print memory" instruction.
@@ -454,11 +456,11 @@ void CPU::read() {
         uint32_t rs2_val = registers[decodedInstruction.rs2];
         switch (decodedInstruction.funct3) {
             case 0x0: // load Matrix A: memory -> NPU (tile is contiguous in memory)
-                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                for (uint32_t i = 0; i < NPU::TILE_ELEMS / 4; i++) // int8: 4 elements per word
                     memory->write_word(NPU::MAT_A_ADDR + i * 4, memory->read_word(base + i * 4));
                 break;
             case 0x1: // load Matrix B: memory -> NPU (tile is contiguous in memory)
-                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                for (uint32_t i = 0; i < NPU::TILE_ELEMS / 4; i++) // int8: 4 elements per word
                     memory->write_word(NPU::MAT_B_ADDR + i * 4, memory->read_word(base + i * 4));
                 break;
             case 0x2: // store Matrix C: NPU -> memory (rs2_val = row stride)
@@ -727,11 +729,11 @@ void CPU::read_one(const InstructionFields& f, reg_t aluResult, bool slot_mem_re
         uint32_t rs2_val = registers[f.rs2];
         switch (f.funct3) {
             case 0x0: // load Matrix A: memory -> NPU (tile is contiguous in memory)
-                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                for (uint32_t i = 0; i < NPU::TILE_ELEMS / 4; i++) // int8: 4 elements per word
                     memory->write_word(NPU::MAT_A_ADDR + i * 4, memory->read_word(base + i * 4));
                 break;
             case 0x1: // load Matrix B: memory -> NPU (tile is contiguous in memory)
-                for (uint32_t i = 0; i < NPU::MAX_DIM * NPU::MAX_DIM; i++)
+                for (uint32_t i = 0; i < NPU::TILE_ELEMS / 4; i++) // int8: 4 elements per word
                     memory->write_word(NPU::MAT_B_ADDR + i * 4, memory->read_word(base + i * 4));
                 break;
             case 0x2: // store Matrix C: NPU -> memory (rs2_val = row stride)

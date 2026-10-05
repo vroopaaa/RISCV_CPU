@@ -28,21 +28,26 @@ public:
     static constexpr uint32_t PRINT_ADDR      = NPU_BASE + 0x1C;
 
 
-    // A, B, and result all live inside ONE contiguous data window now
+    // A, B, and result all live inside ONE contiguous data window.
+    // A and B are int8 (1 byte/element, packed 4 per word over MMIO,
+    // little-endian); the result C is int32 (4 bytes/element) since
+    // accumulating K int8 products overflows 8 bits.
+    static constexpr uint32_t TILE_ELEMS      = MAX_DIM * MAX_DIM;
+    static_assert(TILE_ELEMS % 4 == 0, "A/B tiles must be a whole number of words (MAX_DIM even)");
     static constexpr uint32_t MAT_A_ADDR      = NPU_BASE + 0x100;
-    static constexpr uint32_t MAT_B_ADDR      = MAT_A_ADDR + MAX_DIM * MAX_DIM * 4;  
-    static constexpr uint32_t RESULT_ADDR     = MAT_B_ADDR + MAX_DIM * MAX_DIM * 4;  
-    static constexpr uint32_t DATA_WINDOW_END = RESULT_ADDR + MAX_DIM * MAX_DIM * 4; 
+    static constexpr uint32_t MAT_B_ADDR      = MAT_A_ADDR + TILE_ELEMS;      // int8
+    static constexpr uint32_t RESULT_ADDR     = MAT_B_ADDR + TILE_ELEMS;      // int32 from here
+    static constexpr uint32_t DATA_WINDOW_END = RESULT_ADDR + TILE_ELEMS * 4;
     static constexpr uint32_t NPU_WINDOW_SIZE = DATA_WINDOW_END - NPU_BASE;
 
 private:
-    // one flat array = the NPU's entire data SRAM.
-    // A occupies [0, 64), B occupies [64, 128), C (result) occupies [128, 192).
-    int32_t data[3 * MAX_DIM * MAX_DIM];
+    // The NPU's data SRAM: int8 operands (A then B, contiguous) and the
+    // int32 accumulator/result C.
+    int8_t  ab[2 * TILE_ELEMS];   // A occupies [0, TILE_ELEMS), B occupies [TILE_ELEMS, 2*TILE_ELEMS)
+    int32_t c[TILE_ELEMS];
 
     static constexpr uint32_t A_OFFSET = 0;
-    static constexpr uint32_t B_OFFSET = MAX_DIM * MAX_DIM;
-    static constexpr uint32_t C_OFFSET = 2 * MAX_DIM * MAX_DIM;
+    static constexpr uint32_t B_OFFSET = TILE_ELEMS;
 
     uint32_t M, K, N;
     bool done;

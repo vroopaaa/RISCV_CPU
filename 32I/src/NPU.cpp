@@ -2,8 +2,8 @@
 #include <iostream>
 
 NPU::NPU() : M(0), K(0), N(0), done(false) {
-    for (uint32_t i = 0; i < 3 * MAX_DIM * MAX_DIM; i++)
-        data[i] = 0;
+    for (uint32_t i = 0; i < 2 * TILE_ELEMS; i++) ab[i] = 0;
+    for (uint32_t i = 0; i < TILE_ELEMS; i++)     c[i]  = 0;
 }
 
 void NPU::compute() {
@@ -11,8 +11,8 @@ void NPU::compute() {
         for (uint32_t j = 0; j < N; j++) {
             int32_t sum = 0;
             for (uint32_t k = 0; k < K; k++)
-                sum += data[A_OFFSET + i * MAX_DIM + k] * data[B_OFFSET + k * MAX_DIM + j];
-            data[C_OFFSET + i * MAX_DIM + j] = sum;
+                sum += (int32_t)ab[A_OFFSET + i * MAX_DIM + k] * (int32_t)ab[B_OFFSET + k * MAX_DIM + j];
+            c[i * MAX_DIM + j] = sum;
         }
     done = true;    
 }
@@ -22,8 +22,8 @@ void NPU::mac() {
         for (uint32_t j = 0; j < N; j++) {
             int32_t sum = 0;
             for (uint32_t k = 0; k < K; k++)
-                sum += data[A_OFFSET + i * MAX_DIM + k] * data[B_OFFSET + k * MAX_DIM + j];
-            data[C_OFFSET + i * MAX_DIM + j] += sum;
+                sum += (int32_t)ab[A_OFFSET + i * MAX_DIM + k] * (int32_t)ab[B_OFFSET + k * MAX_DIM + j];
+            c[i * MAX_DIM + j] += sum;
         }
     done = true;
 }
@@ -36,12 +36,15 @@ void NPU::write(uint32_t address, uint32_t val) {
     if (address == MAC_ADDR)     { mac(); return; }
     if (address == RESET_ADDR)   { reset(); return; }
 
-    if (address >= MAT_A_ADDR && address < DATA_WINDOW_END) {
-        uint32_t idx = (address - MAT_A_ADDR) / 4;   // one index space covers A, B, C
-        if (idx < C_OFFSET) {   // only A/B are CPU-writable; result is output-only
-            data[idx] = (int32_t)val;
-            return;
-        }
+    if (address >= MAT_A_ADDR && address < RESULT_ADDR) {
+        // A/B are int8, so one word write fills 4 consecutive elements
+        // (little-endian). Only A/B are CPU-writable; the result is output-only.
+        uint32_t byte_off = (address - MAT_A_ADDR) & ~3u;
+        for (uint32_t i = 0; i < 4; i++)
+            ab[byte_off + i] = (int8_t)((val >> (8 * i)) & 0xFF);
+        return;
+    }
+    if (address >= RESULT_ADDR && address < DATA_WINDOW_END) {
         std::cerr << "[NPU] Write to read-only RESULT register at 0x"
                   << std::hex << address << std::dec << " ignored\n";
         return;
@@ -55,9 +58,15 @@ uint32_t NPU::read(uint32_t address) {
     if (address == STATUS_ADDR) return done ? 1u : 0u;
     if (address == PRINT_ADDR)  { print_matrices(); return 0; }
 
-    if (address >= MAT_A_ADDR && address < DATA_WINDOW_END) {
-        uint32_t idx = (address - MAT_A_ADDR) / 4;
-        return (uint32_t)data[idx];
+    if (address >= MAT_A_ADDR && address < RESULT_ADDR) {
+        uint32_t byte_off = (address - MAT_A_ADDR) & ~3u;   // pack 4 int8 -> 1 word
+        uint32_t word = 0;
+        for (uint32_t i = 0; i < 4; i++)
+            word |= (uint32_t)(uint8_t)ab[byte_off + i] << (8 * i);
+        return word;
+    }
+    if (address >= RESULT_ADDR && address < DATA_WINDOW_END) {
+        return (uint32_t)c[(address - RESULT_ADDR) / 4];
     }
 
     std::cerr << "[NPU] Read from unmapped or write-only register at 0x"
@@ -68,6 +77,6 @@ uint32_t NPU::read(uint32_t address) {
 void NPU::reset() {
     // Clears the matrices
     done = false;
-    for (uint32_t i = 0; i < 3 * MAX_DIM * MAX_DIM; i++)
-        data[i] = 0;
+    for (uint32_t i = 0; i < 2 * TILE_ELEMS; i++) ab[i] = 0;
+    for (uint32_t i = 0; i < TILE_ELEMS; i++)     c[i]  = 0;
 }

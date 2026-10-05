@@ -4,7 +4,7 @@ NPU matmul test driver.
 
 For a given square matrix size (a multiple of 16, since the NPU's native
 tile is 16x16), this script:
-  1. Generates random A/B matrices in Python.
+  1. Generates random int8 A/B matrices in Python (C is int32).
   2. Fills them into a c_tests/matmul_template*.c's {{BIG_DIM}}/{{MATRIX_A_DATA}}/
      {{MATRIX_B_DATA}} placeholders, producing a real .c file. Two templates
      are available (--template): 1 is the original per-word MMIO tile
@@ -27,7 +27,7 @@ Usage:
   python3 run_npu_tests.py --sizes 16 32 48 64       # specific size(s), space-separated
   python3 run_npu_tests.py --sizes 128               # just one size
   python3 run_npu_tests.py --seed 42                 # reproducible run (same data every time)
-  python3 run_npu_tests.py --low -100 --high 100     # override the random value range (default -10..10)
+  python3 run_npu_tests.py --low -100 --high 100     # override the random value range (default -10..10; must stay within int8, -128..127)
   python3 run_npu_tests.py --sizes 512 --cycles 5000000   # override the cycle budget if auto-estimate isn't enough
   python3 run_npu_tests.py --template 1              # use the original per-word MMIO template instead
   python3 run_npu_tests.py --mode superscalar               # run the SAME correctness check through the
@@ -125,7 +125,14 @@ def build_harness(tile_dim=DEFAULT_TILE_SIZE):
     return harness_path
 
 
+INT8_MIN, INT8_MAX = -128, 127
+
+
 def generate_matrix(size, low, high, rng):
+    # A and B are int8 on the NPU; anything outside this range would be
+    # silently truncated when compiled into the C template's int8_t arrays.
+    if low < INT8_MIN or high > INT8_MAX:
+        raise ValueError(f"--low/--high must stay within int8 range [{INT8_MIN}, {INT8_MAX}], got [{low}, {high}]")
     return [[rng.randint(low, high) for _ in range(size)] for _ in range(size)]
 
 

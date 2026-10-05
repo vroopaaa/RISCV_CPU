@@ -1,4 +1,6 @@
 // Template for a square NxN * NxN NPU matmul test, tiled into 16x16 blocks.
+// A/B are int8 (packed 4 per word over MMIO, little-endian); the result C is
+// int32.
 // The BIG_DIM/MATRIX_A_DATA/MATRIX_B_DATA placeholder tokens below (each
 // wrapped in double curly braces) are filled in by run_npu_tests.py -- this
 // file is never compiled as-is.
@@ -28,6 +30,15 @@ static inline uint32_t npu_read32(uint32_t addr) {
     return val;
 }
 
+// Packs 4 consecutive int8 elements into one little-endian word, the unit
+// the NPU's A/B MMIO window is written in.
+static inline uint32_t pack4(const int8_t* p) {
+    return (uint32_t)(uint8_t)p[0]
+         | ((uint32_t)(uint8_t)p[1] << 8)
+         | ((uint32_t)(uint8_t)p[2] << 16)
+         | ((uint32_t)(uint8_t)p[3] << 24);
+}
+
 // Move one word directly from an NPU MMIO register into ordinary Memory.
 // Early-clobber ("=&r") on tmp: it's written by the lw before it's read by
 // the sw, so tmp must not share a register with either input address.
@@ -46,6 +57,7 @@ static inline void npu_move_word(uint32_t npu_addr, uint32_t mem_addr) {
 // NPU register map (matches NPU::write()/read() in NPU.cpp)
 // ---------------------------------------------------------------------
 
+#define NPU_BASE      0x80000000U
 #ifndef MAX_DIM
 #define MAX_DIM       {{TILE_DIM}}U          // NPU's native tile size
 #endif
@@ -60,8 +72,8 @@ static inline void npu_move_word(uint32_t npu_addr, uint32_t mem_addr) {
 #define PRINT_ADDR    (NPU_BASE + 0x1C)
 
 #define MAT_A_ADDR    (NPU_BASE + 0x100)
-#define MAT_B_ADDR    (MAT_A_ADDR + MAX_DIM * MAX_DIM * 4)
-#define RESULT_ADDR   (MAT_B_ADDR + MAX_DIM * MAX_DIM * 4)
+#define MAT_B_ADDR    (MAT_A_ADDR + MAX_DIM * MAX_DIM)       // A/B: int8, 1 byte/element
+#define RESULT_ADDR   (MAT_B_ADDR + MAX_DIM * MAX_DIM)       // C: int32, 4 bytes/element
 
 // ---------------------------------------------------------------------
 // Problem size: BIG_DIM x BIG_DIM * BIG_DIM x BIG_DIM -> BIG_DIM x BIG_DIM,
@@ -83,11 +95,11 @@ static inline void npu_move_word(uint32_t npu_addr, uint32_t mem_addr) {
 // re-copied onto the stack on every call -- wasteful here since main()
 // only runs once). The reads below still can't be optimized away, since
 // they feed into npu_write32's "memory"-clobbering inline asm.
-static const int32_t A[BIG_DIM * BIG_DIM] = {
+static const int8_t A[BIG_DIM * BIG_DIM] = {
 {{MATRIX_A_DATA}}
 };
 
-static const int32_t B[BIG_DIM * BIG_DIM] = {
+static const int8_t B[BIG_DIM * BIG_DIM] = {
 {{MATRIX_B_DATA}}
 };
 
@@ -109,19 +121,20 @@ int main() {
             npu_write32(RESET_ADDR, 1);
 
             for (uint32_t Kt = 0; Kt < TILES; Kt++) {
-                // Load A[I][Kt] tile (strided out of the BIG_DIM-wide big matrix)
+                // Load A[I][Kt] tile (strided out of the BIG_DIM-wide big matrix),
+                // 4 int8 elements per MMIO word write.
                 for (uint32_t i = 0; i < M; i++) {
-                    for (uint32_t k = 0; k < K; k++) {
-                        uint32_t val = (uint32_t)A[(I * MAX_DIM + i) * BIG_DIM + (Kt * MAX_DIM + k)];
-                        npu_write32(MAT_A_ADDR + (i * MAX_DIM + k) * 4, val);
+                    for (uint32_t k = 0; k < K; k += 4) {
+                        uint32_t val = pack4(&A[(I * MAX_DIM + i) * BIG_DIM + (Kt * MAX_DIM + k)]);
+                        npu_write32(MAT_A_ADDR + i * MAX_DIM + k, val);
                     }
                 }
 
                 // Load B[Kt][J] tile
                 for (uint32_t k = 0; k < K; k++) {
-                    for (uint32_t j = 0; j < N; j++) {
-                        uint32_t val = (uint32_t)B[(Kt * MAX_DIM + k) * BIG_DIM + (J * MAX_DIM + j)];
-                        npu_write32(MAT_B_ADDR + (k * MAX_DIM + j) * 4, val);
+                    for (uint32_t j = 0; j < N; j += 4) {
+                        uint32_t val = pack4(&B[(Kt * MAX_DIM + k) * BIG_DIM + (J * MAX_DIM + j)]);
+                        npu_write32(MAT_B_ADDR + k * MAX_DIM + j, val);
                     }
                 }
 
