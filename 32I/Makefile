@@ -89,5 +89,66 @@ $(BUILD_DIR)/run_test_t%: $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)
 run-test: $(TEST_DIR)/test.bin $(TEST_TARGET)
 	./$(TEST_TARGET)
 
+# ==========================================
+# SIMT layer (see include/SIMT.h)
+# ==========================================
+# SIMT.cpp calls CPU::decode_one/alu_exec/branch_taken (friend access, see
+# CPU.h), and Memory pulls in NPU -- so every SIMT test links the same four
+# .cpp files as the main scalar test harness above, plus SIMT.cpp itself.
+SIMT_SRCS = $(SRC_DIR)/SIMT.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp
+SIMT_DEPS = $(SIMT_SRCS) $(INC_DIR)/SIMT.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h $(INC_DIR)/NPU.h
+
+SIMT_REGFILE_TEST = $(BUILD_DIR)/simt_regfile_test
+
+$(SIMT_REGFILE_TEST): tests/simt/regfile_test.cpp $(SIMT_DEPS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ tests/simt/regfile_test.cpp $(SIMT_SRCS)
+
+run-simt-regfile-test: $(SIMT_REGFILE_TEST)
+	./$(SIMT_REGFILE_TEST)
+
+# Execution-engine tests: real C kernels (tests/simt/c_tests/*.c) using the
+# .insn-wrapped macros in tests/simt/simt_isa.h, cross-compiled by the
+# unmodified riscv64-unknown-elf-gcc and run through tests/simt/harness.cpp
+# -- same methodology as tests/npu/run_npu_tests.py (compile, run, dump
+# memory, diff against an independently-computed expected result in
+# Python), not a C++ unit test hand-assembling instruction words.
+SIMT_HARNESS = $(BUILD_DIR)/simt_harness
+
+$(SIMT_HARNESS): tests/simt/harness.cpp tests/basic/loader.cpp $(SIMT_DEPS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ tests/simt/harness.cpp tests/basic/loader.cpp $(SIMT_SRCS)
+
+run-simt-exec-tests: $(SIMT_HARNESS)
+	python3 tests/simt/run_simt_tests.py
+
+# SM block-execution test (run_block / SIMT_IDENT) -- hand-encoded kernels, no compiler involved.
+SIMT_RUNBLOCK_TEST = $(BUILD_DIR)/simt_runblock_test
+
+$(SIMT_RUNBLOCK_TEST): tests/simt/run_block_test.cpp $(SIMT_DEPS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ tests/simt/run_block_test.cpp $(SIMT_SRCS)
+
+run-simt-runblock-test: $(SIMT_RUNBLOCK_TEST)
+	./$(SIMT_RUNBLOCK_TEST)
+
+# Grid launcher test (GridLauncher over NUM_SMS SIMTCores) -- hand-encoded kernel, no compiler involved.
+GRID_LAUNCHER_TEST = $(BUILD_DIR)/grid_launcher_test
+
+$(GRID_LAUNCHER_TEST): tests/simt/grid_launcher_test.cpp $(SRC_DIR)/GridLauncher.cpp $(INC_DIR)/GridLauncher.h $(SIMT_DEPS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ tests/simt/grid_launcher_test.cpp $(SRC_DIR)/GridLauncher.cpp $(SIMT_SRCS)
+
+run-grid-launcher-test: $(GRID_LAUNCHER_TEST)
+	./$(GRID_LAUNCHER_TEST)
+
+# Grid-launch kernel tests: hand-written assembly kernels (tests/simt/grid_tests/*.s)
+# launched through GridLauncher by tests/simt/grid_harness.cpp, diffed in Python.
+GRID_HARNESS = $(BUILD_DIR)/grid_harness
+
+$(GRID_HARNESS): tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SRC_DIR)/GridLauncher.cpp $(INC_DIR)/GridLauncher.h $(SIMT_DEPS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SRC_DIR)/GridLauncher.cpp $(SIMT_SRCS)
+
+run-grid-tests: $(GRID_HARNESS)
+	python3 tests/simt/run_grid_tests.py
+
+run-simt-tests: run-simt-regfile-test run-simt-runblock-test run-grid-launcher-test run-simt-exec-tests run-grid-tests
+
 # Phony targets aren't actual files
-.PHONY: all clean test run-test
+.PHONY: all clean test run-test run-simt-regfile-test run-simt-runblock-test run-grid-launcher-test run-grid-tests run-simt-exec-tests run-simt-tests

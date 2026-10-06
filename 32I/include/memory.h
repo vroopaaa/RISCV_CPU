@@ -20,6 +20,7 @@ private:
 public:
     // Constructor initializes the memory size
     Memory(size_t size);
+    size_t size() const { return mem_array.size(); } 
 
     // Read functions
     uint8_t  read_byte(uint32_t address);

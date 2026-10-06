@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RSVP Architecture & Hardware Assumptions</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-dark: #0284c7;
+      --accent: #818cf8;
+      --warning: #fbbf24;
+      --danger: #f87171;
+      --success: #34d399;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    .slide-enter {
+      animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .block-card {
+      transition: all 0.2s ease;
+    }
+    .block-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--primary);
+    }
+  </style>
+</head>
+<body class="p-4 md:p-8 flex flex-col items-center min-h-screen">
+
+  <!-- Presentation Header -->
+  <header class="w-full max-w-6xl flex flex-wrap items-center justify-between pb-4 border-b border-[var(--border)] mb-6 gap-4">
+    <div>
+      <div class="flex items-center gap-3">
+        <span class="px-2.5 py-0.5 rounded text-xs font-mono font-semibold bg-sky-500/10 text-sky-400 border border-sky-500/20">RSVP CPU</span>
+        <span class="text-xs text-[var(--text-muted)] font-mono">32I / 32IV / NPU Baseline</span>
+      </div>
+      <h1 class="text-xl md:text-2xl font-bold tracking-tight mt-1 text-[var(--text)]">Single-Core Hardware Assumptions & Multi-Core Scaling</h1>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="prevBtn" onclick="prevSlide()" class="px-3 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] text-sm font-medium hover:bg-slate-700/50 disabled:opacity-30 disabled:cursor-not-allowed">
+        &larr; Prev
+      </button>
+      <span id="slideIndicator" class="text-xs font-mono text-[var(--text-muted)] px-2">1 / 7</span>
+      <button id="nextBtn" onclick="nextSlide()" class="px-3 py-1.5 rounded-lg border border-[var(--border)] bg-sky-600 text-white text-sm font-medium hover:bg-sky-500 disabled:opacity-30 disabled:cursor-not-allowed">
+        Next &rarr;
+      </button>
+    </div>
+  </header>
+
+  <!-- Slide Navigation Bar -->
+  <nav class="w-full max-w-6xl mb-6 overflow-x-auto pb-2 flex gap-2 text-xs font-mono">
+    <button onclick="goToSlide(0)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">1. Top-Level Core</button>
+    <button onclick="goToSlide(1)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">2. Frontend & BTB</button>
+    <button onclick="goToSlide(2)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">3. Execution & Hazards</button>
+    <button onclick="goToSlide(3)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">4. Memory & Caches</button>
+    <button onclick="goToSlide(4)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">5. NPU Accelerator</button>
+    <button onclick="goToSlide(5)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">6. Model vs. Silicon</button>
+    <button onclick="goToSlide(6)" class="nav-tab px-3 py-1.5 rounded-md whitespace-nowrap border border-transparent hover:bg-slate-800">7. Multi-Core Roadmap</button>
+  </nav>
+
+  <!-- Slide Container -->
+  <main class="w-full max-w-6xl bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 md:p-8 shadow-2xl relative min-h-[560px]">
+    
+    <!-- SLIDE 1: TOP LEVEL ARCHITECTURE -->
+    <section id="slide-0" class="slide-content space-y-6">
+      <div class="flex items-start justify-between">
+        <div>
+          <span class="text-xs font-bold uppercase tracking-wider text-sky-400">Slide 1 &bull; System Architecture</span>
+          <h2 class="text-2xl font-bold mt-1">Single-Core Hardware Block Diagram</h2>
+          <p class="text-sm text-[var(--text-muted)] mt-1">Unified view of the RV32IM pipeline, integrated NPU accelerator, and memory subsystem in the current codebase.</p>
+        </div>
+        <span class="px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Current Baseline</span>
+      </div>
+
+      <!-- Interactive SVG Top-Level Architecture Diagram -->
+      <div class="w-full overflow-x-auto bg-slate-950/60 p-4 rounded-xl border border-slate-800 flex justify-center">
+        <svg viewBox="0 0 950 440" class="w-full max-w-4xl text-xs font-sans select-none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="coreGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#1e293b"/>
+              <stop offset="100%" stop-color="#0f172a"/>
+            </linearGradient>
+            <linearGradient id="npuGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#312e81"/>
+              <stop offset="100%" stop-color="#1e1b4b"/>
+            </linearGradient>
+            <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#38bdf8" />
+            </marker>
+            <marker id="arrowAmber" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24" />
+            </marker>
+            <marker id="arrowPurple" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa" />
+            </marker>
+          </defs>
+
+          <!-- BOUNDING BOX: RV32 CPU CORE -->
+          <rect x="20" y="20" width="580" height="400" rx="14" fill="url(#coreGrad)" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4 2"/>
+          <text x="40" y="48" fill="#38bdf8" font-size="14" font-weight="bold">RV32 Core (Hart 0) &bull; In-Order Superscalar (Width n=1..10)</text>
+
+          <!-- FRONTEND BLOCK -->
+          <rect x="40" y="70" width="160" height="150" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
+          <text x="55" y="94" fill="#f8fafc" font-size="13" font-weight="bold">Instruction Frontend</text>
+          <rect x="50" y="105" width="140" height="30" rx="4" fill="#334155" stroke="#64748b"/>
+          <text x="60" y="125" fill="#e2e8f0" font-size="11">PC / Next PC Gen</text>
+          <rect x="50" y="145" width="140" height="60" rx="4" fill="#0f172a" stroke="#0284c7"/>
+          <text x="60" y="165" fill="#38bdf8" font-size="11" font-weight="bold">128-Entry BTB</text>
+          <text x="60" y="182" fill="#94a3b8" font-size="10">2-bit Saturating Counter</text>
+          <text x="60" y="196" fill="#94a3b8" font-size="10">Speculative Fetch & Squash</text>
+
+          <!-- DECODE & HAZARD BLOCK -->
+          <rect x="230" y="70" width="160" height="150" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
+          <text x="245" y="94" fill="#f8fafc" font-size="13" font-weight="bold">Decode & Hazard</text>
+          <rect x="240" y="105" width="140" height="40" rx="4" fill="#334155"/>
+          <text x="250" y="123" fill="#e2e8f0" font-size="10" font-weight="bold">Parallel Decoders</text>
+          <text x="250" y="137" fill="#94a3b8" font-size="9">n slots &bull; RV32IM + Custom-0</text>
+          <rect x="240" y="155" width="140" height="50" rx="4" fill="#0f172a" stroke="#eab308"/>
+          <text x="250" y="173" fill="#fbbf24" font-size="10" font-weight="bold">Hazard Scanner</text>
+          <text x="250" y="188" fill="#94a3b8" font-size="9">RAW, WAW, Port Conflict</text>
+          <text x="250" y="199" fill="#94a3b8" font-size="9">Outputs issueCount (m &le; n)</text>
+
+          <!-- EXECUTION UNITS & REGFILE -->
+          <rect x="420" y="70" width="160" height="240" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
+          <text x="435" y="94" fill="#f8fafc" font-size="13" font-weight="bold">Execution & RegFile</text>
+          <rect x="430" y="105" width="140" height="55" rx="4" fill="#0f172a" stroke="#38bdf8"/>
+          <text x="440" y="123" fill="#38bdf8" font-size="10" font-weight="bold">General Purpose Regs</text>
+          <text x="440" y="138" fill="#94a3b8" font-size="9">32 &times; 32-bit (x0=0)</text>
+          <text x="440" y="150" fill="#94a3b8" font-size="9">Multi-port read/write</text>
+
+          <rect x="430" y="170" width="140" height="65" rx="4" fill="#334155"/>
+          <text x="440" y="188" fill="#e2e8f0" font-size="10" font-weight="bold">ALU Array & RV32M</text>
+          <text x="440" y="202" fill="#94a3b8" font-size="9">&bull; Arithmetic / Logical / Shifts</text>
+          <text x="440" y="215" fill="#94a3b8" font-size="9">&bull; HW Mul/Div (1-cycle model)</text>
+          <text x="440" y="227" fill="#94a3b8" font-size="9">&bull; Branch target resolution</text>
+
+          <rect x="430" y="245" width="140" height="55" rx="4" fill="#0f172a" stroke="#34d399"/>
+          <text x="440" y="263" fill="#34d399" font-size="10" font-weight="bold">Memory Stage (read_m)</text>
+          <text x="440" y="278" fill="#94a3b8" font-size="9">Load / Store execution</text>
+          <text x="440" y="291" fill="#94a3b8" font-size="9">Custom-0 NPU Dispatch</text>
+
+          <!-- NPU COPROCESSOR BLOCK -->
+          <rect x="640" y="20" width="290" height="230" rx="14" fill="url(#npuGrad)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="660" y="48" fill="#c084fc" font-size="14" font-weight="bold">NPU Accelerator (MMIO: 0x80000000)</text>
+          
+          <rect x="660" y="65" width="250" height="55" rx="6" fill="#1e1b4b" stroke="#6366f1"/>
+          <text x="670" y="85" fill="#a5b4fc" font-size="11" font-weight="bold">Control & Config Regs</text>
+          <text x="670" y="100" fill="#94a3b8" font-size="9">DIM_M, DIM_K, DIM_N (Up to 16)</text>
+          <text x="670" y="112" fill="#94a3b8" font-size="9">TRIGGER, MAC, RESET, STATUS, PRINT</text>
+
+          <rect x="660" y="130" width="250" height="50" rx="6" fill="#1e1b4b" stroke="#818cf8"/>
+          <text x="670" y="150" fill="#a5b4fc" font-size="11" font-weight="bold">3 KB Internal Data SRAM</text>
+          <text x="670" y="165" fill="#94a3b8" font-size="9">Tile A (1KB) + Tile B (1KB) + Tile C (1KB)</text>
+
+          <rect x="660" y="190" width="250" height="45" rx="6" fill="#312e81"/>
+          <text x="670" y="210" fill="#e0e7ff" font-size="11" font-weight="bold">Systolic Matrix Multiply Core</text>
+          <text x="670" y="224" fill="#94a3b8" font-size="9">16 &times; 16 &times; 16 int32 GEMM / MAC engine</text>
+
+          <!-- MAIN MEMORY SUBSYSTEM (NO CACHES) -->
+          <rect x="40" y="330" width="890" height="90" rx="10" fill="#0f172a" stroke="#f43f5e" stroke-width="1.5"/>
+          <text x="60" y="355" fill="#fb7185" font-size="13" font-weight="bold">Monolithic Physical Memory Subsystem (No L1-I / L1-D / L2 Caches!)</text>
+          <text x="60" y="375" fill="#94a3b8" font-size="11">Flat byte-addressable std::vector&lt;uint8_t&gt; &bull; Size: 4 MB &bull; Little-endian &bull; Zero-wait-state instant response</text>
+          <text x="60" y="395" fill="#cbd5e1" font-size="10">Simultaneous read_word / write_word calls &bull; Custom-0 bulk tile copy (1024 bytes/cycle) directly accesses memory</text>
+
+          <!-- BUSES & CONNECTIONS -->
+          <!-- Fetch bus -->
+          <path d="M 120 330 L 120 220" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="125" y="270" fill="#38bdf8" font-size="10">n &times; 4B fetch</text>
+
+          <!-- Pipeline forward -->
+          <path d="M 200 145 L 230 145" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M 390 145 L 420 145" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+          <!-- CPU to Memory Load/Store -->
+          <path d="M 500 300 L 500 330" stroke="#34d399" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="505" y="320" fill="#34d399" font-size="10">L/S bus</text>
+
+          <!-- CPU to NPU MMIO/Custom-0 -->
+          <path d="M 580 270 L 640 200" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrowPurple)"/>
+          <text x="585" y="240" fill="#a78bfa" font-size="10">Custom-0 / MMIO</text>
+
+          <!-- NPU to Memory DMA/Bulk Transfer -->
+          <path d="M 780 250 L 780 330" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrowAmber)"/>
+          <text x="790" y="300" fill="#fbbf24" font-size="10">Bulk Tile Transfer (1024B)</text>
+        </svg>
+      </div>
+
+      <!-- Quick Summary Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
+          <div class="text-xs font-semibold uppercase tracking-wider text-sky-400">Core Pipeline</div>
+          <div class="text-sm font-medium mt-1">In-Order Superscalar (1 to 10 wide)</div>
+          <p class="text-xs text-[var(--text-muted)] mt-1">Direct issue prefix scanner. Speculative branch execution with 128-entry BTB.</p>
+        </div>
+        <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
+          <div class="text-xs font-semibold uppercase tracking-wider text-amber-400">Memory Hierarchy</div>
+          <div class="text-sm font-medium mt-1 text-amber-300">Uncached Flat Memory</div>
+          <p class="text-xs text-[var(--text-muted)] mt-1">No L1-I, L1-D, or L2 caches. Zero memory latency assumption on all accesses.</p>
+        </div>
+        <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
+          <div class="text-xs font-semibold uppercase tracking-wider text-purple-400">Accelerator</div>
+          <div class="text-sm font-medium mt-1">16&times;16 Tiled NPU Matrix Engine</div>
+          <p class="text-xs text-[var(--text-muted)] mt-1">Custom-0 ISA bulk tile transfers. 3 KB dedicated internal SRAM for A, B, and C.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 2: FRONTEND & BRANCH PREDICTION -->
+    <section id="slide-1" class="slide-content space-y-6 hidden">
+      <div>
+        <span class="text-xs font-bold uppercase tracking-wider text-sky-400">Slide 2 &bull; Core Frontend</span>
+        <h2 class="text-2xl font-bold mt-1">Instruction Fetch & Branch Target Buffer (BTB)</h2>
+        <p class="text-sm text-[var(--text-muted)] mt-1">How instructions enter the pipeline, how branches are speculated, and what hardware is assumed.</p>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- Diagram / Spec Column -->
+        <div class="lg:col-span-7 bg-slate-950/60 p-5 rounded-xl border border-slate-800 space-y-4">
+          <h3 class="text-sm font-bold text-slate-200">Frontend Flow & BTB Structure</h3>
+          
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800 font-mono text-xs space-y-2">
+            <div class="flex justify-between border-b border-slate-800 pb-1">
+              <span class="text-sky-400 font-bold">fetch_n() Logic</span>
+              <span class="text-slate-400">issueWidth n &le; 10</span>
+            </div>
+            <p class="text-slate-300">1. Reads <code class="text-emerald-400">n</code> consecutive words from <code class="text-emerald-400">Memory</code> starting at <code class="text-emerald-400">fetch_pc</code>.</p>
+            <p class="text-slate-300">2. For each slot, checks opcode:</p>
+            <ul class="list-disc pl-5 space-y-1 text-slate-400">
+              <li><span class="text-amber-300">Branch (0x63):</span> BTB lookup &bull; hash = <code class="text-sky-300">(pc &gt;&gt; 2) & 0x7F</code></li>
+              <li>If BTB state &ge; 2 (WT / ST) &rarr; <strong class="text-emerald-400">Predict Taken</strong>: redirect <code class="text-sky-300">fetch_pc = target_pc</code></li>
+              <li>Else &rarr; <strong class="text-red-400">Predict Not-Taken</strong>: continue fall-through <code class="text-sky-300">fetch_pc += 4</code></li>
+              <li><span class="text-rose-400">Jump (0x6F, 0x67):</span> No speculation &rarr; closes the fetch window!</li>
+            </ul>
+          </div>
+
+          <!-- BTB State Machine Visual -->
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800">
+            <div class="text-xs font-bold text-slate-300 mb-2">2-Bit Saturating Counter State Machine</div>
+            <div class="grid grid-cols-4 gap-2 text-center text-xs font-mono">
+              <div class="p-2 rounded bg-slate-800 border border-slate-700">
+                <div class="font-bold text-red-400">00: SNT</div>
+                <div class="text-[10px] text-slate-400">Strong Not-Taken</div>
+              </div>
+              <div class="p-2 rounded bg-slate-800 border border-slate-700">
+                <div class="font-bold text-amber-400">01: WNT</div>
+                <div class="text-[10px] text-slate-400">Weak Not-Taken</div>
+              </div>
+              <div class="p-2 rounded bg-slate-800 border border-slate-700">
+                <div class="font-bold text-blue-400">10: WT</div>
+                <div class="text-[10px] text-slate-400">Weak Taken</div>
+              </div>
+              <div class="p-2 rounded bg-slate-800 border border-slate-700">
+                <div class="font-bold text-emerald-400">11: ST</div>
+                <div class="text-[10px] text-slate-400">Strong Taken</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Assumptions & Limitations -->
+        <div class="lg:col-span-5 space-y-4">
+          <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
+            <div class="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase">
+              <span>&#9888;</span> Key Hardware Assumptions
+            </div>
+            <ul class="mt-3 space-y-2 text-xs text-slate-300">
+              <li class="flex items-start gap-2">
+                <span class="text-sky-400">&bull;</span>
+                <span><strong>Multi-Word Single-Cycle Fetch:</strong> The core reads up to 10 instruction words (40 bytes) simultaneously from memory in a single cycle.</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <span class="text-sky-400">&bull;</span>
+                <span><strong>Zero-Cycle I-Cache Hit:</strong> Fetch never stalls for cache line refills, alignment penalties, or DRAM latency.</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <span class="text-sky-400">&bull;</span>
+                <span><strong>Mid-Window Redirection:</strong> If a branch predicts taken, subsequent slots in the <em>same cycle's packet</em> are fetched from the target address without bubble cycles!</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <span class="text-sky-400">&bull;</span>
+                <span><strong>Mispredict Penalty:</strong> Handled by cancelling downstream instructions in the current window (<code class="text-slate-200">windowCancelled[i]=true</code>). No multi-cycle pipeline flush delay is modeled.</span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="p-4 rounded-xl bg-blue-950/30 border border-blue-900/40 text-xs text-slate-300">
+            <div class="font-bold text-sky-400 mb-1">Multi-Core Consideration</div>
+            <p>In a 2 or 4-core system, multiple cores fetching 4-10 words per cycle will saturate any realistic memory bus immediately unless private L1 Instruction Caches (L1-I) are introduced.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 3: EXECUTION & HAZARDS -->
+    <section id="slide-2" class="slide-content space-y-6 hidden">
+      <div>
+        <span class="text-xs font-bold uppercase tracking-wider text-sky-400">Slide 3 &bull; Execution Subsystem</span>
+        <h2 class="text-2xl font-bold mt-1">Hazard Detection, ALUs & Single-Cycle Latency</h2>
+        <p class="text-sm text-[var(--text-muted)] mt-1">Analysis of the hazard scanner, execution units, and arithmetic timing assumptions.</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- Left: Hazard Scanner -->
+        <div class="p-5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
+          <div class="text-sm font-bold text-slate-200 flex items-center justify-between">
+            <span>In-Order Hazard Scanner (hazard_scan)</span>
+            <span class="text-xs text-emerald-400 font-mono">Prefix Picker</span>
+          </div>
+          <p class="text-xs text-[var(--text-muted)]">Scans slots 0 to fetchCount-1 and stops at the first structural or data hazard:</p>
+
+          <div class="space-y-2 text-xs">
+            <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
+              <span class="font-bold text-amber-400">1. RAW (True Dependency):</span>
+              <p class="text-slate-300 mt-1">If slot <code class="text-sky-300">i</code> reads an <code class="text-sky-300">rs1</code> or <code class="text-sky-300">rs2</code> that any prior slot <code class="text-sky-300">j &lt; i</code> writes (<code class="text-sky-300">rd</code>), the issue window stops at <code class="text-sky-300">i</code>. <em>No forwarding is modeled.</em></p>
+            </div>
+
+            <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
+              <span class="font-bold text-purple-400">2. Memory Port Conflicts (MemClass):</span>
+              <p class="text-slate-300 mt-1">Categorized into <code class="text-slate-200">NONE</code>, <code class="text-slate-200">BANK_A</code>, <code class="text-slate-200">BANK_B</code>, <code class="text-slate-200">STORE</code>.</p>
+              <ul class="list-disc pl-5 mt-1 space-y-0.5 text-slate-400">
+                <li>Two stores conflict (single write port model).</li>
+                <li>Two loads into same NPU bank conflict (single bank write port).</li>
+                <li>Stores + NPU bank loads <strong class="text-emerald-400">can co-issue</strong> (different physical ports).</li>
+              </ul>
+            </div>
+
+            <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
+              <span class="font-bold text-sky-400">3. WAR & WAW Hazards:</span>
+              <p class="text-slate-300 mt-1">Implicitly hazard-free: all reads happen in <code class="text-slate-200">execute_m()</code> before any writes land in <code class="text-slate-200">writeback_m()</code>; sequential commit loop preserves latest <code class="text-slate-200">rd</code> value.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: ALU & Latency Assumptions -->
+        <div class="p-5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-4">
+          <div class="text-sm font-bold text-slate-200">Functional Units & Timing Assumptions</div>
+          
+          <table class="w-full text-xs text-left border-collapse">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400">
+                <th class="pb-2">Operation Type</th>
+                <th class="pb-2">RSVP Latency</th>
+                <th class="pb-2">Physical HW Reality</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800 text-slate-300">
+              <tr>
+                <td class="py-2 font-mono text-sky-400">Integer ALU (add/sub/shifts)</td>
+                <td class="py-2 text-emerald-400">1 cycle</td>
+                <td class="py-2">1 cycle</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-mono text-amber-400">RV32M MUL / MULH</td>
+                <td class="py-2 text-emerald-400">1 cycle</td>
+                <td class="py-2 text-amber-300">2-4 cycles pipelined</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-mono text-rose-400">RV32M DIV / REM</td>
+                <td class="py-2 text-emerald-400">1 cycle</td>
+                <td class="py-2 text-rose-400">16-34 cycles (iterative divider)</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-mono text-purple-400">Loads / Stores</td>
+                <td class="py-2 text-emerald-400">1 cycle</td>
+                <td class="py-2 text-amber-300">1-4 cycles (L1), 100+ (DRAM miss)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-200">
+            <strong>Key Takeaway:</strong> Because every instruction executes in exactly 1 uniform cycle with in-order commit, the core requires zero register renaming, scoreboarding, or reorder buffers (ROB). If variable latency or non-blocking loads are introduced, a full pipeline scoreboarding mechanism is needed.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 4: MEMORY SUBSYSTEM & CACHE QUESTION -->
+    <section id="slide-3" class="slide-content space-y-6 hidden">
+      <div>
+        <span class="text-xs font-bold uppercase tracking-wider text-rose-400">Slide 4 &bull; Memory Subsystem</span>
+        <h2 class="text-2xl font-bold mt-1">The Memory Subsystem: Current State vs. Reality</h2>
+        <p class="text-sm text-[var(--text-muted)] mt-1">Investigating what caches exist today (spoiler: none), memory bandwidth, and latency models.</p>
+      </div>
+
+      <!-- Current Memory Architecture Diagram -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+          <div class="text-xs font-bold text-red-400 uppercase">L1 Instruction Cache</div>
+          <div class="text-lg font-bold text-slate-200">NON-EXISTENT</div>
+          <p class="text-xs text-slate-400">PC accesses main memory vector directly via <code class="text-slate-300">read_word()</code>. Up to 10 reads per cycle with 0 wait-states.</p>
+        </div>
+        <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+          <div class="text-xs font-bold text-red-400 uppercase">L1 Data Cache</div>
+          <div class="text-lg font-bold text-slate-200">NON-EXISTENT</div>
+          <p class="text-xs text-slate-400">Loads and stores hit flat RAM directly. No cache lines, no dirty bits, no write-back or write-through buffers.</p>
+        </div>
+        <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+          <div class="text-xs font-bold text-red-400 uppercase">L2 / L3 Shared Cache</div>
+          <div class="text-lg font-bold text-slate-200">NON-EXISTENT</div>
+          <p class="text-xs text-slate-400">No intermediate caching layer. RAM is an unrestricted 4MB <code class="text-slate-300">std::vector&lt;uint8_t&gt;</code>.</p>
+        </div>
+      </div>
+
+      <div class="p-5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-4">
+        <h3 class="text-sm font-bold text-slate-200">The 4 Major Memory Assumptions in the Single-Core Model</h3>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800">
+            <span class="font-bold text-sky-400">1. Instantaneous Memory Access (0 Latency):</span>
+            <p class="text-slate-300 mt-1">In real silicon, accessing off-chip DRAM takes 50–150 ns (~100 CPU cycles). In RSVP, memory access takes 0 nanoseconds — it is an in-memory C++ array lookup.</p>
+          </div>
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800">
+            <span class="font-bold text-emerald-400">2. Infinite Memory Bandwidth:</span>
+            <p class="text-slate-300 mt-1">In a single cycle, the CPU can fetch 10 instructions (40 bytes), perform multiple data loads/stores, and execute an NPU tile transfer (1,024 bytes) concurrently with no bus throttling.</p>
+          </div>
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800">
+            <span class="font-bold text-amber-400">3. Harvard Bus Decoupling:</span>
+            <p class="text-slate-300 mt-1">Instruction fetch and data memory access never contend for a shared bus or port. Both paths independently invoke methods on the same <code class="text-slate-200">Memory*</code> instance.</p>
+          </div>
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800">
+            <span class="font-bold text-purple-400">4. Uniform Single Memory Address Space:</span>
+            <p class="text-slate-300 mt-1">RAM occupies <code class="text-slate-200">0x00000000</code> to <code class="text-slate-200">0x003FFFFF</code> (4MB), and NPU MMIO occupies <code class="text-slate-200">0x80000000+</code>. All accesses are decoded synchronously inside <code class="text-slate-200">Memory::read_word()</code>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 5: NPU ACCELERATOR & MEMORY WINDOW -->
+    <section id="slide-4" class="slide-content space-y-6 hidden">
+      <div>
+        <span class="text-xs font-bold uppercase tracking-wider text-purple-400">Slide 5 &bull; Accelerator</span>
+        <h2 class="text-2xl font-bold mt-1">NPU Matrix Accelerator Architecture</h2>
+        <p class="text-sm text-[var(--text-muted)] mt-1">Internal SRAM buffers, custom-0 instruction mechanics, and execution assumptions.</p>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- Left: SRAM & MMIO -->
+        <div class="lg:col-span-7 bg-slate-950/60 p-5 rounded-xl border border-slate-800 space-y-4">
+          <div class="text-sm font-bold text-slate-200 flex items-center justify-between">
+            <span>NPU Hardware Blocks</span>
+            <span class="text-xs font-mono text-purple-400">MAX_DIM = 16</span>
+          </div>
+
+          <!-- Memory Map Graphic -->
+          <div class="space-y-2 text-xs font-mono">
+            <div class="p-2.5 rounded bg-slate-900 border border-purple-500/30 flex justify-between items-center">
+              <div>
+                <span class="text-purple-400 font-bold">MMIO Control Regs</span>
+                <span class="text-slate-400 ml-2">(0x80000000 &ndash; 0x8000001C)</span>
+              </div>
+              <span class="text-[10px] text-slate-400">DIM_M, K, N, TRIGGER, MAC, RESET, STATUS, PRINT</span>
+            </div>
+
+            <div class="p-2.5 rounded bg-slate-900 border border-sky-500/30 flex justify-between items-center">
+              <div>
+                <span class="text-sky-400 font-bold">Matrix A SRAM Window</span>
+                <span class="text-slate-400 ml-2">(0x80000100 &ndash; +1024B)</span>
+              </div>
+              <span class="text-[10px] text-slate-400">256 words (16&times;16 int32)</span>
+            </div>
+
+            <div class="p-2.5 rounded bg-slate-900 border border-sky-500/30 flex justify-between items-center">
+              <div>
+                <span class="text-sky-400 font-bold">Matrix B SRAM Window</span>
+                <span class="text-slate-400 ml-2">(+1024B to +2048B)</span>
+              </div>
+              <span class="text-[10px] text-slate-400">256 words (16&times;16 int32)</span>
+            </div>
+
+            <div class="p-2.5 rounded bg-slate-900 border border-emerald-500/30 flex justify-between items-center">
+              <div>
+                <span class="text-emerald-400 font-bold">Result C SRAM Window</span>
+                <span class="text-slate-400 ml-2">(+2048B to +3072B)</span>
+              </div>
+              <span class="text-[10px] text-slate-400">256 words (Accumulator buffer)</span>
+            </div>
+          </div>
+
+          <!-- Custom-0 Instructions -->
+          <div class="p-3 bg-slate-900 rounded-lg border border-slate-800 text-xs">
+            <div class="font-bold text-slate-300 mb-1">Custom-0 ISA Extensions (Opcode: 0x0B)</div>
+            <div class="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-300">
+              <div><code class="text-sky-400">funct3=0:</code> Load Tile A (contig 1KB)</div>
+              <div><code class="text-sky-400">funct3=1:</code> Load Tile B (contig 1KB)</div>
+              <div><code class="text-emerald-400">funct3=2:</code> Store Tile C (strided 2D)</div>
+              <div><code class="text-slate-400">funct3=3:</code> Debug print matrix</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Assumptions -->
+        <div class="lg:col-span-5 space-y-4 text-xs">
+          <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+            <div class="font-bold text-purple-400 uppercase tracking-wider">NPU Hardware Assumptions</div>
+            <ul class="space-y-2 text-slate-300">
+              <li class="flex items-start gap-2">
+                <span class="text-purple-400 font-bold">&bull;</span>
+                <span><strong>Instantaneous Compute:</strong> Writing to <code class="text-slate-200">TRIGGER</code> or <code class="text-slate-200">MAC</code> calculates 4,096 MACs in 0 simulation cycles. No busy-polling required.</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <span class="text-purple-400 font-bold">&bull;</span>
+                <span><strong>Instantaneous DMA:</strong> Tile transfers (<code class="text-slate-200">load_a/load_b/store_c</code>) move 1,024 bytes synchronously in a single cycle loop inside <code class="text-slate-200">read_m()</code>.</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <span class="text-purple-400 font-bold">&bull;</span>
+                <span><strong>Tightly-Coupled Accelerator:</strong> The NPU is effectively an extension of the CPU's memory stage rather than an autonomous asynchronous DMA engine.</span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="p-4 rounded-xl bg-purple-950/30 border border-purple-900/40 text-slate-300">
+            <div class="font-bold text-purple-300 mb-1">Multi-Core Challenge</div>
+            <p>If there is only 1 NPU in a 2 or 4-core SoC, which core owns it? Sharing the NPU requires hardware arbitration or mutex locking; otherwise, Core 1 will overwrite Matrix A while Core 0 is computing!</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 6: SIMULATOR VS PHYSICAL SILICON -->
+    <section id="slide-5" class="slide-content space-y-6 hidden">
+      <div>
+        <span class="text-xs font-bold uppercase tracking-wider text-amber-400">Slide 6 &bull; Reality Check</span>
+        <h2 class="text-2xl font-bold mt-1">Architectural Comparison: RSVP vs. Physical Hardware</h2>
+        <p class="text-sm text-[var(--text-muted)] mt-1">Understanding where our current functional model simplifies hardware and what gaps exist.</p>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs text-left border-collapse bg-slate-950/60 rounded-xl overflow-hidden border border-slate-800">
+          <thead>
+            <tr class="bg-slate-900/90 text-slate-400 border-b border-slate-800">
+              <th class="p-3 font-semibold">Subsystem</th>
+              <th class="p-3 font-semibold text-sky-400">Current RSVP Implementation</th>
+              <th class="p-3 font-semibold text-amber-400">Real Physical Silicon (e.g. SiFive / Rocket)</th>
+              <th class="p-3 font-semibold">Significance for Multi-Core</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800 text-slate-300">
+            <tr>
+              <td class="p-3 font-bold text-slate-200">Instruction Cache</td>
+              <td class="p-3 text-red-400 font-mono">None (Direct vector read)</td>
+              <td class="p-3 text-slate-300">16KB–64KB L1-I (32B–64B lines)</td>
+              <td class="p-3 text-amber-300 font-medium">Critical: Multiple cores will bottleneck on instruction bus.</td>
+            </tr>
+            <tr>
+              <td class="p-3 font-bold text-slate-200">Data Cache</td>
+              <td class="p-3 text-red-400 font-mono">None (Direct vector read/write)</td>
+              <td class="p-3 text-slate-300">16KB–64KB L1-D (Write-back / Write-through)</td>
+              <td class="p-3 text-rose-400 font-medium">Critical: Shared memory coherence (MESI/MSI) needed.</td>
+            </tr>
+            <tr>
+              <td class="p-3 font-bold text-slate-200">Memory Latency</td>
+              <td class="p-3 text-emerald-400 font-mono">0 cycles (Instantaneous)</td>
+              <td class="p-3 text-slate-300">L1: 1–3 cyc &bull; L2: 10–15 cyc &bull; DRAM: 100+ cyc</td>
+              <td class="p-3">Multi-core will reveal true latency sensitivity.</td>
+            </tr>
+            <tr>
+              <td class="p-3 font-bold text-slate-200">ALU / M Latency</td>
+              <td class="p-3 text-emerald-400 font-mono">1 cycle (Uniform)</td>
+              <td class="p-3 text-slate-300">MUL: 2–4 cyc &bull; DIV: 16–34 cyc iterative</td>
+              <td class="p-3">Requires scoreboarding / register busy bits if varied.</td>
+            </tr>
+            <tr>
+              <td class="p-3 font-bold text-slate-200">NPU Accelerator</td>
+              <td class="p-3 text-purple-400 font-mono">0-cycle sync compute & 1-cycle DMA</td>
+              <td class="p-3 text-slate-300">Multi-cycle systolic execution & DMA IRQs</td>
+              <td class="p-3 text-amber-300 font-medium">Core arbitration / Mutex required if shared across cores.</td>
+            </tr>
+            <tr>
+              <td class="p-3 font-bold text-slate-200">Atomic Operations</td>
+              <td class="p-3 text-red-400 font-mono">Not implemented (No RV32A)</td>
+              <td class="p-3 text-slate-300">LR.W, SC.W, AMOADD, AMOSWAP</td>
+              <td class="p-3 text-rose-400 font-bold">Mandatory: Multi-core synchronization requires atomics.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SLIDE 7: MULTI-CORE SCALING ROADMAP -->
+    <section id="slide-6" class="slide-content space-y-6 hidden">
+      <div>
+        <span class="text-xs font-bold uppercase tracking-wider text-emerald-400">Slide 7 &bull; Next Steps</span>
+        <h2 class="text-2xl font-bold mt-1">Multi-Core Architecture Roadmap: 2 &bull; 4 Cores</h2>
+        <p class="text-sm text-[var(--text-muted)] mt-1">Step-by-step transition plan from single-core to 2-core and 4-core execution.</p>
+      </div>
+
+      <!-- 2-Core & 4-Core Visual -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- 2-Core Architecture Block -->
+        <div class="p-5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-bold text-sky-400">Phase 1: Dual-Core (2 Cores)</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-sky-500/10 text-sky-400 border border-sky-500/20">Target 1</span>
+          </div>
+
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-xs space-y-2">
+            <div class="flex justify-between border-b border-slate-800 pb-1">
+              <span class="text-slate-300">Core 0 (Hart 0)</span>
+              <span class="text-slate-300">Core 1 (Hart 1)</span>
+            </div>
+            <div class="text-center py-2 text-slate-400 border-b border-slate-800">
+              &darr; &uarr; Shared Interconnect / Bus Arbiter &darr; &uarr;
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-center pt-1">
+              <div class="p-1.5 rounded bg-slate-800 text-[11px] text-amber-300">Shared Main Memory (RAM)</div>
+              <div class="p-1.5 rounded bg-slate-800 text-[11px] text-purple-300">Shared or Dual NPU</div>
+            </div>
+          </div>
+
+          <div class="space-y-1.5 text-xs text-slate-300">
+            <div class="font-semibold text-slate-200">Essential Additions for 2 Cores:</div>
+            <ul class="list-disc pl-5 space-y-1 text-slate-400">
+              <li><strong class="text-slate-200">Hart ID Register:</strong> CSR <code class="text-sky-300">mhartid</code> so code knows if it is Core 0 or Core 1.</li>
+              <li><strong class="text-slate-200">Interconnect Arbiter:</strong> Round-robin memory arbitration between Core 0 and Core 1.</li>
+              <li><strong class="text-slate-200">Basic Atomics (RV32A) or Mutex MMIO:</strong> Spinlock support for workload dispatch.</li>
+              <li><strong class="text-slate-200">Independent Reset/Halt:</strong> Core 1 can halt without freezing Core 0.</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- 4-Core Architecture Block -->
+        <div class="p-5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-bold text-indigo-400">Phase 2: Quad-Core (4 Cores)</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Target 2</span>
+          </div>
+
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-xs space-y-2">
+            <div class="grid grid-cols-4 gap-1 text-center border-b border-slate-800 pb-2">
+              <span class="text-slate-300 text-[11px]">Core 0</span>
+              <span class="text-slate-300 text-[11px]">Core 1</span>
+              <span class="text-slate-300 text-[11px]">Core 2</span>
+              <span class="text-slate-300 text-[11px]">Core 3</span>
+            </div>
+            <div class="text-center py-1.5 text-slate-400 border-b border-slate-800">
+              Crossbar / Interconnect (4 Master Ports)
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-center pt-1">
+              <div class="p-1.5 rounded bg-slate-800 text-[11px] text-amber-300">Multi-Banked RAM</div>
+              <div class="p-1.5 rounded bg-slate-800 text-[11px] text-purple-300">NPU Cluster / Arbiter</div>
+            </div>
+          </div>
+
+          <div class="space-y-1.5 text-xs text-slate-300">
+            <div class="font-semibold text-slate-200">Key Architectural Decisions Needed:</div>
+            <ul class="list-disc pl-5 space-y-1 text-slate-400">
+              <li><strong class="text-slate-200">NPU Topology:</strong> Does each core get a private NPU (4 NPUs total), or is 1 NPU shared via hardware queue?</li>
+              <li><strong class="text-slate-200">Memory Bandwidth Bottleneck:</strong> 4 cores &times; 10 words fetch = 160 bytes/cyc. Needs banking or L1 caches.</li>
+              <li><strong class="text-slate-200">Inter-Processor Interrupts (CLINT/MSIP):</strong> Core 0 dispatches jobs to Cores 1..3 via hardware doorbell interrupts.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Decision Matrix for Discussion -->
+      <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 text-xs">
+        <div class="font-bold text-emerald-400 mb-2 uppercase tracking-wider">Key Decisions to Agree On for Multi-Core:</div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-slate-300">
+          <div class="p-2.5 rounded bg-slate-950 border border-slate-800">
+            <strong class="text-sky-300">1. NPU Allocation:</strong>
+            <p class="text-slate-400 mt-1">Option A: 1 shared NPU with MMIO mutex lock.<br>Option B: 1 private NPU per core (independent SRAMs).</p>
+          </div>
+          <div class="p-2.5 rounded bg-slate-950 border border-slate-800">
+            <strong class="text-amber-300">2. Cache Hierarchy:</strong>
+            <p class="text-slate-400 mt-1">Option A: Uncached flat memory with round-robin arbiter (simplest functional step).<br>Option B: Add L1-I / L1-D caches with basic coherence.</p>
+          </div>
+          <div class="p-2.5 rounded bg-slate-950 border border-slate-800">
+            <strong class="text-purple-300">3. Synchronization:</strong>
+            <p class="text-slate-400 mt-1">Implement standard RV32A instructions (LR/SC, AMO) vs. memory-mapped hardware mutex registers.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Slide Controller Script -->
+  <script>
+    let currentSlide = 0;
+    const totalSlides = 7;
+
+    function updateSlide() {
+      // Hide all slides
+      for (let i = 0; i < totalSlides; i++) {
+        const slide = document.getElementById(`slide-${i}`);
+        if (slide) {
+          slide.classList.add('hidden');
+          slide.classList.remove('slide-enter');
+        }
+      }
+      // Show current slide
+      const activeSlide = document.getElementById(`slide-${currentSlide}`);
+      if (activeSlide) {
+        activeSlide.classList.remove('hidden');
+        activeSlide.classList.add('slide-enter');
+      }
+
+      // Update indicator
+      document.getElementById('slideIndicator').textContent = `${currentSlide + 1} / ${totalSlides}`;
+      document.getElementById('prevBtn').disabled = (currentSlide === 0);
+      document.getElementById('nextBtn').disabled = (currentSlide === totalSlides - 1);
+
+      // Update nav tabs
+      const tabs = document.querySelectorAll('.nav-tab');
+      tabs.forEach((tab, index) => {
+        if (index === currentSlide) {
+          tab.classList.add('bg-sky-600', 'text-white', 'border-sky-500');
+          tab.classList.remove('border-transparent', 'hover:bg-slate-800', 'text-slate-300');
+        } else {
+          tab.classList.remove('bg-sky-600', 'text-white', 'border-sky-500');
+          tab.classList.add('border-transparent', 'hover:bg-slate-800', 'text-slate-300');
+        }
+      });
+    }
+
+    function nextSlide() {
+      if (currentSlide < totalSlides - 1) {
+        currentSlide++;
+        updateSlide();
+      }
+    }
+
+    function prevSlide() {
+      if (currentSlide > 0) {
+        currentSlide--;
+        updateSlide();
+      }
+    }
+
+    function goToSlide(index) {
+      if (index >= 0 && index < totalSlides) {
+        currentSlide = index;
+        updateSlide();
+      }
+    }
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        nextSlide();
+      } else if (e.key === 'ArrowLeft') {
+        prevSlide();
+      }
+    });
+
+    // Initialize
+    updateSlide();
+  </script>
+
+</body>
+</html>

@@ -497,7 +497,7 @@ void CPU::writeback() {
 // In-order superscalar issue -- see docs/superscalar.md for the design.
 // =============================================================================
 
-CPU::InstructionFields CPU::decode_one(reg_t word) const {
+CPU::InstructionFields CPU::decode_one(reg_t word) {
     InstructionFields f;
     f.opcode = word & 0x7F;
     f.rd = (word >> 7) & 0x1F;
@@ -527,38 +527,37 @@ CPU::InstructionFields CPU::decode_one(reg_t word) const {
     return f;
 }
 
-reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_next_pc, bool& out_next_pc_set) {
+reg_t CPU::alu_exec(const InstructionFields& f, reg_t a, reg_t b, reg_t pc) {
     reg_t result = 0;
-    out_next_pc_set = false;
     switch (f.opcode) {
         case 0x13: {
             switch (f.funct3) {
                 case 0x0: // ADDI
-                    result = registers[f.rs1] + f.imm_I;
+                    result = a + f.imm_I;
                     break;
                 case 0x2: // SLTI
-                    result = ((int32_t)registers[f.rs1] < (int32_t)f.imm_I) ? 1 : 0;
+                    result = ((int32_t)a < (int32_t)f.imm_I) ? 1 : 0;
                     break;
                 case 0x3: // SLTIU
-                    result = ((uint32_t)registers[f.rs1] < (uint32_t)f.imm_I) ? 1 : 0;
+                    result = ((uint32_t)a < (uint32_t)f.imm_I) ? 1 : 0;
                     break;
                 case 0x4: // XORI
-                    result = registers[f.rs1] ^ f.imm_I;
+                    result = a ^ f.imm_I;
                     break;
                 case 0x6: // ORI
-                    result = registers[f.rs1] | f.imm_I;
+                    result = a | f.imm_I;
                     break;
                 case 0x7: // ANDI
-                    result = registers[f.rs1] & f.imm_I;
+                    result = a & f.imm_I;
                     break;
                 case 0x1: // SLLI
-                    result = registers[f.rs1] << (f.imm_I & 0x1F);
+                    result = a << (f.imm_I & 0x1F);
                     break;
                 case 0x5: // SRLI and SRAI
                     if ((f.imm_I >> 10) & 0x1) {
-                        result = (int32_t)registers[f.rs1] >> (f.imm_I & 0x1F);
+                        result = (int32_t)a >> (f.imm_I & 0x1F);
                     } else {
-                        result = registers[f.rs1] >> (f.imm_I & 0x1F);
+                        result = a >> (f.imm_I & 0x1F);
                     }
                     break;
             }
@@ -569,7 +568,7 @@ reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_nex
             break;
         }
         case 0x17: { // AUIPC
-            result = slot_pc + f.imm_U;
+            result = pc + f.imm_U;
             break;
         }
         case 0x33: {
@@ -579,88 +578,111 @@ reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_nex
                     switch (f.funct3) {
                         case 0x0: // ADD and SUB
                             if (f.funct7 == 0x00) {
-                                result = registers[f.rs1] + registers[f.rs2];
+                                result = a + b;
                             } else if (f.funct7 == 0x20) {
-                                result = registers[f.rs1] - registers[f.rs2];
+                                result = a - b;
                             }
                             break;
                         case 0x1: // SLL
-                            result = registers[f.rs1] << (registers[f.rs2] & 0x1F);
+                            result = a << (b & 0x1F);
                             break;
                         case 0x2: // SLT
-                            result = ((int32_t)registers[f.rs1] < (int32_t)registers[f.rs2]) ? 1 : 0;
+                            result = ((int32_t)a < (int32_t)b) ? 1 : 0;
                             break;
                         case 0x3: // SLTU
-                            result = ((uint32_t)registers[f.rs1] < (uint32_t)registers[f.rs2]) ? 1 : 0;
+                            result = ((uint32_t)a < (uint32_t)b) ? 1 : 0;
                             break;
                         case 0x4: // XOR
-                            result = registers[f.rs1] ^ registers[f.rs2];
+                            result = a ^ b;
                             break;
                         case 0x5: // SRL and SRA
                             if (f.funct7 == 0x00) {
-                                result = registers[f.rs1] >> (registers[f.rs2] & 0x1F);
+                                result = a >> (b & 0x1F);
                             } else if (f.funct7 == 0x20) {
-                                result = (int32_t)registers[f.rs1] >> (registers[f.rs2] & 0x1F);
+                                result = (int32_t)a >> (b & 0x1F);
                             }
                             break;
                         case 0x6: // OR
-                            result = registers[f.rs1] | registers[f.rs2];
+                            result = a | b;
                             break;
                         case 0x7: // AND
-                            result = registers[f.rs1] & registers[f.rs2];
+                            result = a & b;
                             break;
                     }
                     break;
                 case 0x01: {
                     switch (f.funct3) {
                         case 0x0: // MUL
-                            result = registers[f.rs1] * registers[f.rs2];
+                            result = a * b;
                             break;
                         case 0x1: // MULH
-                            result = ((int64_t)(int32_t)registers[f.rs1] * (int64_t)(int32_t)registers[f.rs2]) >> 32;
+                            result = ((int64_t)(int32_t)a * (int64_t)(int32_t)b) >> 32;
                             break;
                         case 0x2: // MULHSU
-                            result = ((int64_t)(int32_t)registers[f.rs1] * (uint64_t)(uint32_t)registers[f.rs2]) >> 32;
+                            result = ((int64_t)(int32_t)a * (uint64_t)(uint32_t)b) >> 32;
                             break;
                         case 0x3: // MULHU
-                            result = ((uint64_t)(uint32_t)registers[f.rs1] * (uint64_t)(uint32_t)registers[f.rs2]) >> 32;
+                            result = ((uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b) >> 32;
                             break;
                         case 0x4: // DIV
-                            if (registers[f.rs2] == 0) {
+                            if (b == 0) {
                                 result = -1;
-                            } else if (registers[f.rs1] == 0x80000000 && (int32_t)registers[f.rs2] == -1) {
+                            } else if (a == 0x80000000 && (int32_t)b == -1) {
                                 result = 0x80000000;
                             } else {
-                                result = (int32_t)registers[f.rs1] / (int32_t)registers[f.rs2];
+                                result = (int32_t)a / (int32_t)b;
                             }
                             break;
                         case 0x5: // DIVU
-                            if (registers[f.rs2] == 0) {
+                            if (b == 0) {
                                 result = UINT32_MAX;
                             } else {
-                                result = registers[f.rs1] / registers[f.rs2];
+                                result = a / b;
                             }
                             break;
                         case 0x6: // REM
-                            if (registers[f.rs2] == 0) {
-                                result = registers[f.rs1];
-                            } else if (registers[f.rs1] == 0x80000000 && (int32_t)registers[f.rs2] == -1) {
+                            if (b == 0) {
+                                result = a;
+                            } else if (a == 0x80000000 && (int32_t)b == -1) {
                                 result = 0;
                             } else {
-                                result = (int32_t)registers[f.rs1] % (int32_t)registers[f.rs2];
+                                result = (int32_t)a % (int32_t)b;
                             }
                             break;
                         case 0x7: // REMU
-                            if (registers[f.rs2] == 0) {
-                                result = registers[f.rs1];
+                            if (b == 0) {
+                                result = a;
                             } else {
-                                result = registers[f.rs1] % registers[f.rs2];
+                                result = a % b;
                             }
                     }
                 }
             }
             break;
         }
+    }
+    return result;
+}
+
+bool CPU::branch_taken(uint8_t funct3, reg_t a, reg_t b) {
+    switch (funct3) {
+        case 0x0: return a == b;                    // BEQ
+        case 0x1: return a != b;                     // BNE
+        case 0x4: return (int32_t)a < (int32_t)b;    // BLT
+        case 0x5: return (int32_t)a >= (int32_t)b;   // BGE
+        case 0x6: return a < b;                       // BLTU
+        case 0x7: return a >= b;                       // BGEU
+    }
+    return false;
+}
+
+reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_next_pc, bool& out_next_pc_set) {
+    reg_t result = 0;
+    out_next_pc_set = false;
+    switch (f.opcode) {
+        case 0x13: case 0x37: case 0x17: case 0x33: // OP-IMM / LUI / AUIPC / OP (incl. M ext)
+            result = alu_exec(f, registers[f.rs1], registers[f.rs2], slot_pc);
+            break;
         case 0x03: { // Load address calc
             result = registers[f.rs1] + f.imm_I;
             break;
@@ -670,16 +692,7 @@ reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_nex
             break;
         }
         case 0x63: { // Branch
-            bool branch_taken = false;
-            switch (f.funct3) {
-                case 0x0: branch_taken = (registers[f.rs1] == registers[f.rs2]); break;
-                case 0x1: branch_taken = (registers[f.rs1] != registers[f.rs2]); break;
-                case 0x4: branch_taken = ((int32_t)registers[f.rs1] < (int32_t)registers[f.rs2]); break;
-                case 0x5: branch_taken = ((int32_t)registers[f.rs1] >= (int32_t)registers[f.rs2]); break;
-                case 0x6: branch_taken = (registers[f.rs1] < registers[f.rs2]); break;
-                case 0x7: branch_taken = (registers[f.rs1] >= registers[f.rs2]); break;
-            }
-            if (branch_taken) {
+            if (branch_taken(f.funct3, registers[f.rs1], registers[f.rs2])) {
                 out_next_pc = slot_pc + f.imm_B;
                 out_next_pc_set = true;
             }

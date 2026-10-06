@@ -11,6 +11,12 @@
 typedef uint32_t reg_t;
 
 class CPU {
+    // SIMTCore (32I/include/SIMT.h) reuses CPU's RV32IM decode/ALU/branch
+    // logic for its own lanes instead of duplicating it a third time (see
+    // decode_one/alu_exec/branch_taken below) -- that's the only reason
+    // this friendship exists. InstructionFields and these helpers stay
+    // private/not part of CPU's public interface otherwise.
+    friend class SIMTCore;
 private:
     reg_t registers[NUM_REGS]; // The 32 general-purpose registers
     reg_t pc;                  // The Program Counter
@@ -80,9 +86,20 @@ private:
     // Per-instruction decode/execute/read, used only by the superscalar path
     // (duplicated from decode()/execute()/read(), not shared, so the
     // original path is untouched).
-    InstructionFields decode_one(reg_t word) const;
+    static InstructionFields decode_one(reg_t word);
     reg_t execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_next_pc, bool& out_next_pc_set);
     void read_one(const InstructionFields& f, reg_t aluResult, bool slot_mem_read_enable, bool slot_mem_write_enable, reg_t& out_memResult);
+
+    // Pure RV32IM ALU: opcodes 0x13 (OP-IMM), 0x33 (OP, incl. M ext), 0x37
+    // (LUI), 0x17 (AUIPC). a/b are the already-read rs1/rs2 values, pc is
+    // the instruction's own PC (only AUIPC uses it). The single source of
+    // truth for these ops' semantics -- execute_one() below calls it, and
+    // so does SIMTCore, once per lane.
+    static reg_t alu_exec(const InstructionFields& f, reg_t a, reg_t b, reg_t pc);
+    // BEQ/BNE/BLT/BGE/BLTU/BGEU condition evaluation (opcode 0x63), shared
+    // the same way -- SIMTCore uses this for a SIMT-uniform branch, raising
+    // if active lanes disagree (there's no per-lane PC to diverge to here).
+    static bool branch_taken(uint8_t funct3, reg_t a, reg_t b);
 
     static bool is_branch(uint8_t opcode) { return opcode == 0x63; }
     static bool is_jump(uint8_t opcode) { return opcode == 0x6F || opcode == 0x67; }
@@ -140,6 +157,8 @@ public:
     // whose linker script uses a non-zero origin so qemu-riscv32 can also run
     // the same binary as its reference (qemu-user refuses to mmap address 0).
     void set_pc(reg_t addr) { pc = addr; }
+    // The amount of memory to reserve for the host stack.
+    static constexpr uint32_t HOST_STACK_RESERVE = 0x10000; // 64 KB (Other devices can place it's stack below it)
 };
 
 #endif // CPU_H
