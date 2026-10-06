@@ -164,6 +164,12 @@ if [ "$TRACE" -eq 1 ]; then
     if [ -f "$TRACE_ISA_DIR/src/NPU_print.cpp" ]; then
         HARNESS_SRCS+=("$TRACE_ISA_DIR/src/NPU_print.cpp")
     fi
+    # CPU.cpp's LAUNCH opcode (0x5B) calls into the GPU (32I only).
+    for f in SIMT.cpp GridLauncher.cpp; do
+        if [ -f "$TRACE_ISA_DIR/src/$f" ]; then
+            HARNESS_SRCS+=("$TRACE_ISA_DIR/src/$f")
+        fi
+    done
 
     g++ -std=c++17 -Wall -Wextra -I"$TRACE_ISA_DIR/include" -O2 \
         -o "$WORKDIR/tracer" "$SCRIPT_DIR/lib/trace_harness.cpp" "${HARNESS_SRCS[@]}"

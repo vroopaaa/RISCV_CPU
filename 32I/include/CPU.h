@@ -10,6 +10,8 @@
 
 typedef uint32_t reg_t;
 
+class GridLauncher; // include/GridLauncher.h -- forward-declared: SIMT.h includes CPU.h
+
 class CPU {
     // SIMTCore (32I/include/SIMT.h) reuses CPU's RV32IM decode/ALU/branch
     // logic for its own lanes instead of duplicating it a third time (see
@@ -24,11 +26,14 @@ private:
     reg_t instruction;          // The current instruction being executed
     reg_t aluResult;            // Result from the ALU operation
     reg_t memResult;            // Result from memory read operation
-    reg_t cycle_count;          // Counts completed cycles (one per fetch..writeback pass);
-                                 // separate from the 32 GPRs, not addressable by any instruction
+    uint64_t cycle_count;       // Counts completed cycles (one per fetch..writeback pass, plus
+                                 // a LAUNCH's device cycles); separate from the 32 GPRs, not
+                                 // addressable by any instruction. 64-bit: a grid launch can
+                                 // add more cycles than fit in 32 bits.
     bool halted;                // Set by execute() when a jump/branch targets its own address
                                  // (this codebase's halt idiom, e.g. start.s's `_end: j _end`)
     Memory* memory;            // Pointer to the memory object
+    GridLauncher* gpu;         // GPU run by the LAUNCH opcode (0x5B); null = no GPU attached
     // Helper method to enforce hardware rules
     void enforce_zero_register();
     bool isBranchTaken();
@@ -157,6 +162,14 @@ public:
     // whose linker script uses a non-zero origin so qemu-riscv32 can also run
     // the same binary as its reference (qemu-user refuses to mmap address 0).
     void set_pc(reg_t addr) { pc = addr; }
+    // Connects the GPU that LAUNCH (custom-2, opcode 0x5B) runs kernels on.
+    // Without one, LAUNCH prints an error and does nothing.
+    void attach_gpu(GridLauncher* g) { gpu = g; }
+    uint64_t get_cycle_count() const { return cycle_count; }
+    // Custom-2: host-side grid launch -- .insn r 0x5B, 0, 0, x0, rs1, rs2
+    // rs1 = kernel entry, rs2 = (num_blocks << 16) | threads_per_block,
+    // a0 (x10) = kernel argument (read implicitly). See docs/CUDA/grid_launch_plan.md 4.1.
+    static constexpr uint8_t OPCODE_LAUNCH = 0x5B;
     // The amount of memory to reserve for the host stack.
     static constexpr uint32_t HOST_STACK_RESERVE = 0x10000; // 64 KB (Other devices can place it's stack below it)
 };

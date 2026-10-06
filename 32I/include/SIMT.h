@@ -158,6 +158,11 @@ public:
     uint32_t warp_tmask(int w) const   { return warps[w].tmask; }
     size_t   warp_ipdom_depth(int w) const { return warps[w].ipdom_stack.size(); }
 
+    // True once a warp has hit an instruction an SM can't run (see
+    // unsupported_name()). issue() prints the error and halts that warp;
+    // run_block() then stops the whole block. Cleared at the start of each run_block().
+    bool     faulted() const           { return fault_raised; }
+
 private:
     struct IpdomEntry { uint32_t mask; reg_t reconv_pc; };
     struct Warp {
@@ -178,6 +183,11 @@ private:
     uint32_t grid_dim  = 1;
     reg_t regfile[THREADS_PER_WARP][WARPS_RESIDENT][NUM_ARCH_REGS - 1];
     Warp  warps[WARPS_RESIDENT];
+    bool  fault_raised = false;
+
+    // nullptr if an SM lane can run f; otherwise a short name for the error
+    // message (e.g. "LAUNCH", "NPU", "SIMT_BAR", "LOAD" for a bad width).
+    static const char* unsupported_name(const CPU::InstructionFields& f);
 
     // Lowest-numbered active lane in warp w (0 if its mask is empty) --
     // used wherever a warp-level op needs to read "the" value of a register

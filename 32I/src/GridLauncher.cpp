@@ -30,6 +30,7 @@ uint64_t GridLauncher::launch_grid(reg_t entry, uint32_t threads_per_block, uint
     this->threads_per_block = 0;
     this->nBlocks = 0;
     grid_timed_out = false;
+    grid_faulted = false;
 
     if (!stacks_fit) {
         std::cerr << "[GridLauncher Error] launch refused: no room for the device stacks\n";
@@ -51,7 +52,7 @@ uint64_t GridLauncher::launch_grid(reg_t entry, uint32_t threads_per_block, uint
 
     // Sequential in the emulator; "parallel" only in the cycle accounting.
     for (uint32_t i = 0; i < nBlocks; i++) {
-        uint32_t sm = 0; // Round-robin assignment of blocks to SMs
+        uint32_t sm = i % NUM_SMS; // Round-robin assignment of blocks to SMs
         SIMTCore::BlockLaunch block_info{
             entry,
             i,                 // block_id
@@ -67,6 +68,13 @@ uint64_t GridLauncher::launch_grid(reg_t entry, uint32_t threads_per_block, uint
             std::cerr << "[GridLauncher Error] block " << i << " timed out -- abandoning the remaining "
                       << (nBlocks - 1 - i) << " blocks\n";
             grid_timed_out = true;
+            break;
+        }
+        if (sm_cores[sm].faulted()) {
+            // The SM already printed which instruction it couldn't run.
+            std::cerr << "[GridLauncher Error] block " << i << " faulted -- abandoning the remaining "
+                      << (nBlocks - 1 - i) << " blocks\n";
+            grid_faulted = true;
             break;
         }
     }

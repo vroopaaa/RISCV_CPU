@@ -226,6 +226,7 @@ void SIMTCore::init_block_warp(int w, const BlockLaunch& b, int nwarps) {
 
 uint64_t SIMTCore::run_block(const BlockLaunch& b, bool* timed_out, uint64_t max_issues) {
     if (timed_out) *timed_out = false;
+    fault_raised = false;
     if (b.block_dim == 0 || b.block_dim > MAX_THREADS_PER_BLOCK) {
         std::cerr << "[SIMTCore Error] block_dim " << b.block_dim << " out of range 1.."
                   << MAX_THREADS_PER_BLOCK << "\n";
@@ -243,11 +244,11 @@ uint64_t SIMTCore::run_block(const BlockLaunch& b, bool* timed_out, uint64_t max
     // interleaving gives the same result for barrier-free kernels.
     uint64_t issued = 0;
     bool overran = false;
-    for (int w = 0; w < nwarps && !overran; w++) {
+    for (int w = 0; w < nwarps && !overran && !fault_raised; w++) {
         while (!warps[w].halted) {
             if (issued >= max_issues) { overran = true; break; }
             issue(w);
-            issued++;
+            issued++; // a faulting instruction still counts as issued
         }
     }
     if (overran) {
@@ -260,6 +261,37 @@ uint64_t SIMTCore::run_block(const BlockLaunch& b, bool* timed_out, uint64_t max
     return issued;
 }
 
+// Everything an SM lane can run is listed here; anything else faults instead
+// of being silently skipped (a skipped instruction just gives wrong results).
+const char* SIMTCore::unsupported_name(const CPU::InstructionFields& f) {
+    switch (f.opcode) {
+        case 0x13: case 0x33: case 0x37: case 0x17: // OP-IMM / OP (incl. M ext) / LUI / AUIPC
+        case 0x6F:                                   // JAL
+            return nullptr;
+        case 0x0F:                                   // FENCE: no reordering in this model, a no-op is correct
+            return nullptr;
+        case 0x67:                                   // JALR
+            return (f.funct3 == 0) ? nullptr : "JALR";
+        case 0x03:                                   // LB/LH/LW/LBU/LHU
+            return (f.funct3 <= 2 || f.funct3 == 4 || f.funct3 == 5) ? nullptr : "LOAD";
+        case 0x23:                                   // SB/SH/SW
+            return (f.funct3 <= 2) ? nullptr : "STORE";
+        case 0x63:                                   // BEQ/BNE/BLT/BGE/BLTU/BGEU
+            return (f.funct3 == 2 || f.funct3 == 3) ? "BRANCH" : nullptr;
+        case OPCODE_SIMT:
+            switch (f.funct3) {
+                case SIMT_WSPAWN: return "SIMT_WSPAWN"; // needs the Phase 4 scheduler
+                case SIMT_BAR:    return "SIMT_BAR";    // needs the Phase 4 scheduler
+                case SIMT_IDENT:  return ((uint8_t)f.funct7 <= IDENT_HW_TID) ? nullptr : "SIMT_IDENT";
+                default:          return nullptr;
+            }
+        case CPU::OPCODE_LAUNCH: return "LAUNCH";   // no launching from inside a kernel
+        case 0x0B:               return "NPU";      // GPU -> NPU handoff not built (Phase 5)
+        case 0x73:               return "SYSTEM";   // ECALL/EBREAK/CSR: no trap or CSR support
+        default:                 return "unknown";
+    }
+}
+
 void SIMTCore::issue(int w) {
     assert(w >= 0 && w < WARPS_RESIDENT);
     Warp& warp = warps[w];
@@ -269,6 +301,16 @@ void SIMTCore::issue(int w) {
     CPU::InstructionFields f = CPU::decode_one(word);
     reg_t pc = warp.pc;
     reg_t next_pc = pc + 4; // default fall-through, same as CPU::fetch()
+
+    const char* bad = unsupported_name(f);
+    if (bad != nullptr) {
+        std::cerr << "[SIMTCore Error] SM " << sm_id << " block " << warp.block_id << " warp " << w
+                  << " pc 0x" << std::hex << pc << ": unsupported instruction 0x" << std::setw(8)
+                  << std::setfill('0') << word << std::setfill(' ') << std::dec << " (" << bad << ")\n";
+        fault_raised = true;
+        warp.halted = true; // pc stays on the faulting instruction
+        return;
+    }
 
     if (f.opcode == OPCODE_SIMT) {
         exec_simt(w, f); // warp-level; none of the SIMT ops touch pc

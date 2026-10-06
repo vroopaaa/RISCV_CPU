@@ -40,3 +40,11 @@
     srli \rd, \rd, 16
     andi \rd, \rd, 0xFF
 .endm
+
+# ---- Host side (run by the CPU, not by SM lanes) ----
+# custom-2 (0x5B) funct3 0: LAUNCH -- run kernel `entry` over a grid and resume
+# at pc+4 once every block is done. dims = (num_blocks << 16) | threads_per_block,
+# and the kernel argument is read implicitly from a0.
+.macro SIMT_LAUNCH entry, dims
+    .insn r 0x5B, 0, 0, zero, \entry, \dims
+.endm

@@ -1,5 +1,6 @@
 #include "../include/CPU.h"
 #include "../include/NPU.h"
+#include "../include/GridLauncher.h"
 #include <iostream>
 #include <cstring>
 #include <iomanip>
@@ -7,6 +8,7 @@
 // Constructor: Initializes the CPU state
 CPU::CPU(Memory* mem_ptr) {
     memory = mem_ptr;
+    gpu = nullptr;
 
     std::memset(registers, 0, sizeof(registers));
     pc = 0;
@@ -136,6 +138,15 @@ void CPU::decode() {
         // Memory::print_matrix(). All done in read(), touching neither a
         // register nor the scalar mem_read/write path.
         case 0x0B:
+            mem_read_enable  = false;
+            mem_write_enable = false;
+            reg_write_enable = false;
+            break;
+
+        // Custom-2: LAUNCH (.insn r 0x5B, 0, 0, x0, rs1, rs2) -- runs a kernel
+        // grid on the attached GPU in read(); writes no register, and the
+        // scalar mem path stays off (the GPU does its own memory accesses).
+        case OPCODE_LAUNCH:
             mem_read_enable  = false;
             mem_write_enable = false;
             reg_write_enable = false;
@@ -385,6 +396,10 @@ void CPU::execute() {
             aluResult = registers[decodedInstruction.rs1]; // base address, consumed by read()
             break;
         }
+        case OPCODE_LAUNCH: { // Custom-2: grid launch
+            aluResult = registers[decodedInstruction.rs1]; // kernel entry, consumed by read()
+            break;
+        }
     }
     // A jump/branch whose target is its own address (e.g. start.s's `_end: j _end`)
     // is this codebase's halt idiom -- the program has finished and is spinning forever.
@@ -472,6 +487,33 @@ void CPU::read() {
             case 0x3: // print NxN region of memory at base (rs2_val = N)
                 memory->print_matrix(base, rs2_val, rs2_val);
                 break;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Custom-2 (opcode 0x5B) funct3 0: LAUNCH. The CPU stalls here until the
+    // whole grid has run, then carries on at pc+4; the device cycles are
+    // added to this CPU's cycle count. Other funct3 values are reserved.
+    // ---------------------------------------------------------
+    if (decodedInstruction.opcode == OPCODE_LAUNCH) {
+        if (decodedInstruction.funct3 != 0) {
+            std::cerr << "[CPU Error] reserved LAUNCH funct3 " << (int)decodedInstruction.funct3
+                      << " at pc 0x" << std::hex << pc << std::dec << " -- ignored\n";
+        } else if (gpu == nullptr) {
+            std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << pc << std::dec
+                      << " with no GPU attached -- ignored\n";
+        } else {
+            uint32_t dims              = registers[decodedInstruction.rs2];
+            uint32_t num_blocks        = dims >> 16;
+            uint32_t threads_per_block = dims & 0xFFFF;
+            cycle_count += gpu->launch_grid(aluResult, threads_per_block, num_blocks, registers[10]);
+            // The GPU raised a flag (an instruction it can't run, or a runaway
+            // kernel): the results are wrong from here on, so the host stops.
+            if (gpu->faulted() || gpu->timed_out()) {
+                std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << pc << std::dec
+                          << " failed on the GPU -- halting\n";
+                halted = true;
+            }
         }
     }
 }

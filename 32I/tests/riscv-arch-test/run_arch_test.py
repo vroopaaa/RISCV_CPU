@@ -62,6 +62,8 @@ HARNESS_SRCS = [
     os.path.join(PROJECT_ROOT, "src", "memory.cpp"),
     os.path.join(PROJECT_ROOT, "src", "NPU.cpp"),
     os.path.join(PROJECT_ROOT, "src", "NPU_print.cpp"),
+    os.path.join(PROJECT_ROOT, "src", "SIMT.cpp"),          # CPU.cpp's LAUNCH opcode
+    os.path.join(PROJECT_ROOT, "src", "GridLauncher.cpp"),  # calls into the GPU
 ]
 HARNESS_BIN = os.path.join(BUILD_DIR, "arch_test_harness")
 

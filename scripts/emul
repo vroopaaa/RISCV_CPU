@@ -82,6 +82,12 @@ fi
 if [ -f "$ISA_DIR/src/NPU_print.cpp" ]; then
     HARNESS_SRCS+=("$ISA_DIR/src/NPU_print.cpp")
 fi
+# CPU.cpp's LAUNCH opcode (0x5B) calls into the GPU (32I only).
+for f in SIMT.cpp GridLauncher.cpp; do
+    if [ -f "$ISA_DIR/src/$f" ]; then
+        HARNESS_SRCS+=("$ISA_DIR/src/$f")
+    fi
+done
 HARNESS_SRCS+=("$ISA_DIR/tests/basic/main.cpp" "$ISA_DIR/tests/basic/loader.cpp")
 
 g++ -std=c++17 -Wall -Wextra -I"$ISA_DIR/include" -O2 \

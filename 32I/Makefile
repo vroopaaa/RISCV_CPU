@@ -36,8 +36,11 @@ $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 	@echo "Build successful! Run with: ./$(TARGET)"
 
-# Rule to compile each .cpp file into a .o file
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
+# Rule to compile each .cpp file into a .o file. Every object depends on every
+# header: a class layout change (e.g. a new CPU member) must rebuild all users,
+# otherwise old objects disagree about sizeof/offsets and crash at run time.
+HEADERS = $(wildcard $(INC_DIR)/*.h)
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Rule to create the build directory if it doesn't exist
@@ -76,13 +79,14 @@ test: $(TEST_DIR)/test.bin
 # ==========================================
 TEST_TARGET = $(BUILD_DIR)/run_test
 
-# Linked directly against CPU.cpp/memory.cpp/NPU.cpp -- NOT src/main.cpp,
+# Linked directly against CPU.cpp/memory.cpp/NPU.cpp (+ SIMT.cpp/GridLauncher.cpp:
+# CPU.cpp's LAUNCH opcode calls into the GPU) -- NOT src/main.cpp,
 # since that already has its own main() and would clash with tests/basic/main.cpp
-$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp $(INC_DIR)/NPU.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h | $(BUILD_DIR)
+$(TEST_TARGET): $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp $(SRC_DIR)/SIMT.cpp $(SRC_DIR)/GridLauncher.cpp $(INC_DIR)/NPU.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h $(INC_DIR)/SIMT.h $(INC_DIR)/GridLauncher.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(filter %.cpp,$^)
 	@echo "Test harness built! Run with: ./$(TEST_TARGET)"
 
-$(BUILD_DIR)/run_test_t%: $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp $(INC_DIR)/NPU.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h | $(BUILD_DIR)
+$(BUILD_DIR)/run_test_t%: $(TEST_DIR)/main.cpp $(TEST_DIR)/loader.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp $(SRC_DIR)/SIMT.cpp $(SRC_DIR)/GridLauncher.cpp $(INC_DIR)/NPU.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h $(INC_DIR)/SIMT.h $(INC_DIR)/GridLauncher.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DNPU_MAX_DIM=$* -o $@ $(filter %.cpp,$^)
 	@echo "Tile-$* test harness built! Run with: ./$@"
 
@@ -95,8 +99,8 @@ run-test: $(TEST_DIR)/test.bin $(TEST_TARGET)
 # SIMT.cpp calls CPU::decode_one/alu_exec/branch_taken (friend access, see
 # CPU.h), and Memory pulls in NPU -- so every SIMT test links the same four
 # .cpp files as the main scalar test harness above, plus SIMT.cpp itself.
-SIMT_SRCS = $(SRC_DIR)/SIMT.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp
-SIMT_DEPS = $(SIMT_SRCS) $(INC_DIR)/SIMT.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h $(INC_DIR)/NPU.h
+SIMT_SRCS = $(SRC_DIR)/SIMT.cpp $(SRC_DIR)/GridLauncher.cpp $(SRC_DIR)/CPU.cpp $(SRC_DIR)/memory.cpp $(SRC_DIR)/NPU.cpp $(SRC_DIR)/NPU_print.cpp
+SIMT_DEPS = $(SIMT_SRCS) $(INC_DIR)/SIMT.h $(INC_DIR)/GridLauncher.h $(INC_DIR)/CPU.h $(INC_DIR)/memory.h $(INC_DIR)/NPU.h
 
 SIMT_REGFILE_TEST = $(BUILD_DIR)/simt_regfile_test
 
@@ -120,35 +124,17 @@ $(SIMT_HARNESS): tests/simt/harness.cpp tests/basic/loader.cpp $(SIMT_DEPS) | $(
 run-simt-exec-tests: $(SIMT_HARNESS)
 	python3 tests/simt/run_simt_tests.py
 
-# SM block-execution test (run_block / SIMT_IDENT) -- hand-encoded kernels, no compiler involved.
-SIMT_RUNBLOCK_TEST = $(BUILD_DIR)/simt_runblock_test
-
-$(SIMT_RUNBLOCK_TEST): tests/simt/run_block_test.cpp $(SIMT_DEPS) | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ tests/simt/run_block_test.cpp $(SIMT_SRCS)
-
-run-simt-runblock-test: $(SIMT_RUNBLOCK_TEST)
-	./$(SIMT_RUNBLOCK_TEST)
-
-# Grid launcher test (GridLauncher over NUM_SMS SIMTCores) -- hand-encoded kernel, no compiler involved.
-GRID_LAUNCHER_TEST = $(BUILD_DIR)/grid_launcher_test
-
-$(GRID_LAUNCHER_TEST): tests/simt/grid_launcher_test.cpp $(SRC_DIR)/GridLauncher.cpp $(INC_DIR)/GridLauncher.h $(SIMT_DEPS) | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ tests/simt/grid_launcher_test.cpp $(SRC_DIR)/GridLauncher.cpp $(SIMT_SRCS)
-
-run-grid-launcher-test: $(GRID_LAUNCHER_TEST)
-	./$(GRID_LAUNCHER_TEST)
-
 # Grid-launch kernel tests: hand-written assembly kernels (tests/simt/grid_tests/*.s)
 # launched through GridLauncher by tests/simt/grid_harness.cpp, diffed in Python.
 GRID_HARNESS = $(BUILD_DIR)/grid_harness
 
-$(GRID_HARNESS): tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SRC_DIR)/GridLauncher.cpp $(INC_DIR)/GridLauncher.h $(SIMT_DEPS) | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SRC_DIR)/GridLauncher.cpp $(SIMT_SRCS)
+$(GRID_HARNESS): tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SIMT_DEPS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SIMT_SRCS)
 
 run-grid-tests: $(GRID_HARNESS)
 	python3 tests/simt/run_grid_tests.py
 
-run-simt-tests: run-simt-regfile-test run-simt-runblock-test run-grid-launcher-test run-simt-exec-tests run-grid-tests
+run-simt-tests: run-simt-regfile-test run-simt-exec-tests run-grid-tests
 
 # Phony targets aren't actual files
-.PHONY: all clean test run-test run-simt-regfile-test run-simt-runblock-test run-grid-launcher-test run-grid-tests run-simt-exec-tests run-simt-tests
+.PHONY: all clean test run-test run-simt-regfile-test run-grid-tests run-simt-exec-tests run-simt-tests

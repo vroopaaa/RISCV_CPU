@@ -88,7 +88,7 @@ def detect_tile_size(src_path):
 def build_tracer(workdir, tile_dim=16):
     tracer_path = os.path.join(workdir, f"tracer_t{tile_dim}")
     srcs = [TRACE_HARNESS_SRC]
-    for name in ("CPU.cpp", "memory.cpp", "NPU.cpp", "NPU_print.cpp"):
+    for name in ("CPU.cpp", "memory.cpp", "NPU.cpp", "NPU_print.cpp", "SIMT.cpp", "GridLauncher.cpp"):
         path = os.path.join(ISA_DIR, "src", name)
         if os.path.exists(path):
             srcs.append(path)

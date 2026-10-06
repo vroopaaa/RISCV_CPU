@@ -37,6 +37,9 @@ class GridLauncher {
         reg_t    stack_top() const { return device_stack_top; }
         uint64_t sm_cycles(int sm_id) const { return cycles_per_sm[sm_id]; } // last launch
         bool     timed_out() const { return grid_timed_out; }                 // last launch
+        // Last launch hit an instruction an SM can't run; the grid was abandoned
+        // at that block. The host CPU checks this (and timed_out) after LAUNCH.
+        bool     faulted() const { return grid_faulted; }
 
     private:
         uint64_t max_sm_cycles() const;      // largest entry of cycles_per_sm
@@ -47,6 +50,7 @@ class GridLauncher {
         uint32_t nBlocks = 0;
         bool verbose = false;
         bool grid_timed_out = false;
+        bool grid_faulted = false;
         uint64_t max_issues_per_block = 1000000; // run_block's default cap
         std::vector<SIMTCore> sm_cores;      // the SMs, all sharing one Memory*
         std::vector<uint64_t> cycles_per_sm; // per-SM issued instructions, last launch
