@@ -495,26 +495,35 @@ void CPU::read() {
     // whole grid has run, then carries on at pc+4; the device cycles are
     // added to this CPU's cycle count. Other funct3 values are reserved.
     // ---------------------------------------------------------
-    if (decodedInstruction.opcode == OPCODE_LAUNCH) {
-        if (decodedInstruction.funct3 != 0) {
-            std::cerr << "[CPU Error] reserved LAUNCH funct3 " << (int)decodedInstruction.funct3
-                      << " at pc 0x" << std::hex << pc << std::dec << " -- ignored\n";
-        } else if (gpu == nullptr) {
-            std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << pc << std::dec
-                      << " with no GPU attached -- ignored\n";
-        } else {
-            uint32_t dims              = registers[decodedInstruction.rs2];
-            uint32_t num_blocks        = dims >> 16;
-            uint32_t threads_per_block = dims & 0xFFFF;
-            cycle_count += gpu->launch_grid(aluResult, threads_per_block, num_blocks, registers[10]);
-            // The GPU raised a flag (an instruction it can't run, or a runaway
-            // kernel): the results are wrong from here on, so the host stops.
-            if (gpu->faulted() || gpu->timed_out()) {
-                std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << pc << std::dec
-                          << " failed on the GPU -- halting\n";
-                halted = true;
-            }
-        }
+    if (decodedInstruction.opcode == OPCODE_LAUNCH)
+        run_launch(decodedInstruction.funct3, aluResult, registers[decodedInstruction.rs2], pc);
+}
+
+// LAUNCH, shared by the scalar read() and the superscalar read_m(). The CPU
+// stalls here until the whole grid has run (it simply doesn't return before
+// that), then carries on at pc+4 with the device cycles added to its own.
+// entry = rs1, dims = rs2 = (num_blocks << 16) | threads_per_block, and the
+// kernel argument is a0. Other funct3 values are reserved.
+void CPU::run_launch(uint8_t funct3, reg_t entry, reg_t dims, reg_t launch_pc) {
+    if (funct3 != 0) {
+        std::cerr << "[CPU Error] reserved LAUNCH funct3 " << (int)funct3
+                  << " at pc 0x" << std::hex << launch_pc << std::dec << " -- ignored\n";
+        return;
+    }
+    if (gpu == nullptr) {
+        std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << launch_pc << std::dec
+                  << " with no GPU attached -- ignored\n";
+        return;
+    }
+    uint32_t num_blocks        = dims >> 16;
+    uint32_t threads_per_block = dims & 0xFFFF;
+    cycle_count += gpu->launch_grid(entry, threads_per_block, num_blocks, registers[10]);
+    // The GPU raised a flag (an instruction it can't run, or a runaway
+    // kernel): the results are wrong from here on, so the host stops.
+    if (gpu->faulted() || gpu->timed_out()) {
+        std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << launch_pc << std::dec
+                  << " failed on the GPU -- halting\n";
+        halted = true;
     }
 }
 void CPU::writeback() {
@@ -752,6 +761,10 @@ reg_t CPU::execute_one(const InstructionFields& f, reg_t slot_pc, reg_t& out_nex
             out_next_pc_set = true;
             break;
         }
+        case OPCODE_LAUNCH: { // Custom-2: grid launch
+            result = registers[f.rs1]; // kernel entry, consumed by read_m()
+            break;
+        }
         case 0x0B: { // Custom-0: NPU tile transfer / memory print
             result = registers[f.rs1]; // base address, consumed by read_one()
             break;
@@ -835,6 +848,8 @@ void CPU::reg_usage(uint8_t opcode, uint8_t funct3, bool& uses_rs1, bool& uses_r
         case 0x17: // AUIPC
         case 0x6F: // JAL
             uses_rs1 = false; uses_rs2 = false; break;
+        case OPCODE_LAUNCH: // Custom-2: rs1 = kernel entry, rs2 = dims (a0 is read too, see hazard_scan)
+            uses_rs1 = true;  uses_rs2 = true;  break;
         case 0x0B: // Custom-0: rs1 is always the base address; rs2 is only
                    // meaningful for store-C (stride) and memory-print (N).
             uses_rs1 = true;
@@ -906,6 +921,7 @@ void CPU::decode_all() {
                 windowRegWrite[i] = true;
                 break;
             case 0x0B: // Custom-0: NPU tile transfer / memory print
+            case OPCODE_LAUNCH: // Custom-2: grid launch -- done in read_m(), writes no register
                 windowMemRead[i]  = false;
                 windowMemWrite[i] = false;
                 windowRegWrite[i] = false;
@@ -946,6 +962,13 @@ void CPU::hazard_scan() {
     for (int i = 0; i < fetchCount; i++) {
         const InstructionFields& fi = windowDecoded[i];
         MemClass my_class = mem_class(fi.opcode, fi.funct3);
+
+        // LAUNCH issues alone: it reads a0 implicitly (a RAW hazard the
+        // rs1/rs2 check below can't see), it runs a whole grid that reads and
+        // writes memory (a full barrier), and it can't be undone, so it must
+        // never sit in a speculative slot -- slot 0 never is. The CPU stalls
+        // in that cycle while the GPU runs.
+        if (fi.opcode == OPCODE_LAUNCH) { issueCount = (i > 0) ? i : 1; return; }
 
         if (i > 0) {
             bool uses_rs1, uses_rs2;
@@ -1074,13 +1097,11 @@ void CPU::execute_m() {
 void CPU::read_m() {
     for (int i = 0; i < issueCount; i++) {
         if (windowCancelled[i]) continue;
-        // LAUNCH isn't supported on the superscalar path yet (plan phase E):
-        // stop instead of silently skipping the kernel.
+        // LAUNCH always issues alone (see hazard_scan), so every earlier
+        // instruction -- including whatever set a0 -- has already committed.
         if (windowDecoded[i].opcode == OPCODE_LAUNCH) {
-            std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << windowSlotPC[i] << std::dec
-                      << " not supported in superscalar mode -- halting\n";
-            halted = true;
-            return;
+            run_launch(windowDecoded[i].funct3, windowAluResult[i], registers[windowDecoded[i].rs2], windowSlotPC[i]);
+            continue;
         }
         read_one(windowDecoded[i], windowAluResult[i], windowMemRead[i], windowMemWrite[i], windowMemResult[i]);
     }

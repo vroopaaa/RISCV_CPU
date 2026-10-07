@@ -113,13 +113,6 @@ case "$GPU_TRACE" in
     *) echo "error: -gpu must be 'full' or 'summary', got '$GPU_TRACE'" >&2; exit 1 ;;
 esac
 
-# GPU programs (simt_launch) run on the scalar CPU: LAUNCH isn't supported in
-# superscalar mode yet, so switch automatically (same rule as emul).
-if [ "$MODE" = "superscalar" ] && grep -q "simt_launch" "$SRC"; then
-    echo "note: $SRC_ARG uses simt_launch -- running in scalar mode (LAUNCH isn't supported in superscalar mode yet)" >&2
-    MODE="scalar"
-fi
-
 SRC_DIR="$(dirname "$SRC")"
 BASE="$(basename "$SRC")"
 NAME="${BASE%.*}"

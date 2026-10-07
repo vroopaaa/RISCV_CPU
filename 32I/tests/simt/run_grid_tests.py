@@ -126,13 +126,22 @@ def launch(binf, entry, tpb, nb, args, dump_base, dump_words, max_issues=DEFAULT
     }
 
 
+# Issue width the host CPU runs with: 0 = the scalar pipeline, n = the
+# superscalar pipeline at width n. main() reruns every host test per width.
+SS_WIDTH = 0
+SS_WIDTHS = [1, 2, 4, 10]
+
+
 def run_host(binf, dump_base, dump_words, tag, max_cycles=5000000, attach_gpu=True):
     """Boots the host CPU at pc 0 with the GPU attached; the host program
     launches kernels itself through the LAUNCH opcode (0x5B)."""
+    tag = f"{tag}_ss{SS_WIDTH}" if SS_WIDTH else tag
     dump_path = os.path.join(BUILD_DIR, f"{tag}.dump.txt")
     cmd = [HARNESS, "--host", binf, str(max_cycles), f"{dump_base:x}", f"{dump_words * 4:x}", dump_path]
     if not attach_gpu:
         cmd.append("no-gpu")
+    if SS_WIDTH:
+        cmd += ["superscalar", f"width={SS_WIDTH}"]
     proc = run(cmd)
     out = proc.stdout
     m = re.search(r"halted=(\d) cpu_cycles=(\d+) sm_cycles=([\d,]+)", out)
@@ -145,6 +154,21 @@ def run_host(binf, dump_base, dump_words, tag, max_cycles=5000000, attach_gpu=Tr
         "dump": parse_dump_file(dump_path)[:dump_words],
         "stderr": proc.stderr,
     }
+
+
+def check_cpu_cycles(host_instrs, device_cycles, r):
+    """Straight-line host code: scalar runs one instruction per cycle; the
+    superscalar CPU takes between host_instrs/width and host_instrs cycles
+    for it. Either way the launch's device cycles are added on top."""
+    got = r["cpu_cycles"]
+    if not SS_WIDTH:
+        return compare("cpu_cycles", [host_instrs + device_cycles], [got])
+    lo = device_cycles + (host_instrs + SS_WIDTH - 1) // SS_WIDTH
+    hi = device_cycles + host_instrs
+    if lo <= got <= hi:
+        return True
+    print(f"    cpu_cycles: expected {lo}..{hi} (width {SS_WIDTH}), got {got}")
+    return False
 
 
 def read_word(binf_dump, addr, base):
@@ -314,7 +338,7 @@ def test_host_launch(tpb, nb, attach_gpu=True):
     ok &= compare("out", out, r["dump"][:5 * total])
     ok &= compare("marker", [MARKER], [read_word(r["dump"], MARKER_ADDR, RESULT_BASE)])
     ok &= compare("sm_cycles", want_sm, r["sm_cycles"])
-    ok &= compare("cpu_cycles", [host_instrs + max(want_sm)], [r["cpu_cycles"]])
+    ok &= check_cpu_cycles(host_instrs, max(want_sm), r)
     ok &= check_stderr(r, [] if attach_gpu else ["no GPU attached"])
     return ok
 
@@ -365,7 +389,7 @@ def test_host_bad_launch(tpb, nb):
     ok &= compare("out", [0] * 64, r["dump"][:64])
     ok &= compare("marker", [MARKER], [read_word(r["dump"], MARKER_ADDR, RESULT_BASE)])
     ok &= compare("sm_cycles", [0] * NUM_SMS, r["sm_cycles"])
-    ok &= compare("cpu_cycles", [(sym["_end"] - sym["_start"]) // 4 + 1], [r["cpu_cycles"]])
+    ok &= check_cpu_cycles((sym["_end"] - sym["_start"]) // 4 + 1, 0, r)
     ok &= check_stderr(r, ["threads_per_block 129", "nBlocks 0", "reserved LAUNCH funct3 1"])
     return ok
 
@@ -428,7 +452,7 @@ def test_host_fault(tpb, nb, kernel):
     gpu_msg = "unsupported instruction" if kernel == "bad_instr" else "exceeded"
     ok = compare("halted", [1], [int(r["halted"])])
     ok &= compare("marker", [0], [read_word(r["dump"], MARKER_ADDR, RESULT_BASE)])
-    ok &= compare("cpu_cycles", [host_instrs + max(r["sm_cycles"])], [r["cpu_cycles"]])
+    ok &= check_cpu_cycles(host_instrs, max(r["sm_cycles"]), r)
     ok &= check_stderr(r, [gpu_msg, "abandoning", f"[CPU Error] LAUNCH at pc {sym['launch_at']:#x} failed on the GPU -- halting"])
     return ok
 
@@ -544,29 +568,27 @@ def test_c_opt_guard(opt):
     return False
 
 
-def test_c_superscalar_guard(opt):
-    """run_test in superscalar mode (no emul in front of it): LAUNCH isn't
-    supported there yet, so it must halt with an error, never skip silently."""
+def test_c_run_test_superscalar(opt):
+    """run_test (emul's harness) in superscalar mode runs the launch itself:
+    main's self-check returns the number of correct elements in a0."""
     binf, sym = build(f"c_vec_add_ss{opt}", c_file="c_vec_add.c", opt=opt)
-    proc = run([RUN_TEST, binf, "5000000", "0", "0", "", "superscalar"])
-    want = "not supported in superscalar mode -- halting"
+    proc = run([RUN_TEST, binf, "5000000", "0", "0", "", "superscalar", "4"])
+    m = re.findall(r"x10: 0x([0-9a-fA-F]+)", proc.stdout)
+    ok = compare("a0 (correct elements)", [200], [int(m[-1], 16) if m else -1])
+    ok &= compare("ran superscalar", [True], ["Superscalar issue width: 4" in proc.stdout])
     lines = [l for l in proc.stderr.splitlines() if l.strip()]
-    ok = any(want in l and "[CPU Error] LAUNCH at pc" in l for l in lines)
-    if not ok:
-        print(f"    stderr: expected a line containing {want!r}, got {lines[:5]}")
-    return ok
+    for l in lines[:5]:
+        print(f"    stderr: unexpected {l!r}")
+    return ok and not lines
 
 
-def test_c_emul_auto_scalar(opt):
-    """emul -mode superscalar on a program that calls simt_launch runs it in
-    scalar mode automatically, says so, and gets the right answer."""
+def test_c_emul_superscalar(opt):
+    """emul -mode superscalar on a GPU program really runs superscalar now."""
     proc = run([EMUL, "32I", os.path.join(KERNEL_DIR, "c_vec_add.c"), "5000000", opt, "-mode", "superscalar"])
     m = re.findall(r"x10: 0x([0-9a-fA-F]+)", proc.stdout)
     ok = compare("a0 (correct elements)", [200], [int(m[-1], 16) if m else -1])
-    note = "running in scalar mode"
-    if note not in proc.stdout + proc.stderr:
-        print(f"    expected a note containing {note!r}")
-        ok = False
+    ok &= compare("ran superscalar", [True], ["Superscalar issue width" in proc.stdout])
+    ok &= compare("no scalar fallback note", [False], ["running in scalar mode" in proc.stdout + proc.stderr])
     if "Error" in proc.stderr:
         print(f"    unexpected stderr: {proc.stderr.strip()[:300]}")
         ok = False
@@ -648,11 +670,17 @@ def test_c_trace_summary(opt):
     return ok
 
 
-def test_c_trace_auto_scalar(opt):
-    """-mode superscalar on a GPU program traces in scalar mode, with a note."""
+def test_c_trace_superscalar(opt):
+    """-mode superscalar traces the superscalar pipeline, with the GPU section
+    nested under the cycle that issued the LAUNCH (which issues alone)."""
     proc, lines = run_trace("ss", ["-mode", "superscalar"])
-    ok = compare("note", [True], ["running in scalar mode" in proc.stdout + proc.stderr])
-    ok &= compare("GPU section present", [True], [any("launch done" in l for l in lines)])
+    ok = compare("no scalar fallback note", [False], ["running in scalar mode" in proc.stdout + proc.stderr])
+    launch = [l for l in lines if "LAUNCH vec_add 5 blocks x 40 threads" in l]
+    ok &= compare("one LAUNCH line", [1], [len(launch)])
+    ok &= compare("LAUNCH issued alone", [True], [bool(launch) and launch[0].split("\t")[2] == "1"])
+    ok &= compare("block lines", [5], [sum(1 for l in lines if BLOCK_LINE.search(l))])
+    ok &= compare("GPU instruction lines", [True], [any(GPU_LINE.match(l) for l in lines)])
+    ok &= compare("launch done", [1], [sum(1 for l in lines if "launch done" in l)])
     return ok
 
 
@@ -739,9 +767,12 @@ CASES = [
 ]
 # C programs, each at every C_OPTS level: (test name, opt).
 C_CASES = [(name, opt) for name in ["c_vec_add", "c_identity", "c_two_launches", "c_relu",
-                                    "c_bad_launch", "c_emul", "c_opt_guard", "c_superscalar_guard",
-                                    "c_emul_auto_scalar", "c_trace", "c_trace_summary",
-                                    "c_trace_auto_scalar", "c_trace_cwd"] for opt in C_OPTS]
+                                    "c_bad_launch", "c_emul", "c_opt_guard", "c_run_test_superscalar",
+                                    "c_emul_superscalar", "c_trace", "c_trace_summary",
+                                    "c_trace_superscalar", "c_trace_cwd"] for opt in C_OPTS]
+# Host-CPU tests (they boot the CPU) -- rerun on the superscalar pipeline at every SS_WIDTHS width.
+HOST_TESTS = {"host_launch", "host_two_launches", "host_bad_launch", "host_no_gpu", "host_fault"}
+HOST_C_TESTS = {"c_vec_add", "c_identity", "c_two_launches", "c_relu", "c_bad_launch"}
 TESTS = {"identity": test_identity, "stack": test_stack, "vec_add": test_vec_add,
          "divergent": test_divergent, "runaway": test_runaway,
          "bad_launch": test_bad_launch, "ram_too_small": test_ram_too_small,
@@ -750,9 +781,9 @@ TESTS = {"identity": test_identity, "stack": test_stack, "vec_add": test_vec_add
          "bad_instr": test_bad_instr, "fence_ok": test_fence_ok, "host_fault": test_host_fault}
 C_TESTS = {"c_vec_add": test_c_vec_add, "c_identity": test_c_identity, "c_two_launches": test_c_two_launches,
            "c_relu": test_c_relu, "c_bad_launch": test_c_bad_launch, "c_emul": test_c_emul,
-           "c_opt_guard": test_c_opt_guard, "c_superscalar_guard": test_c_superscalar_guard,
-           "c_emul_auto_scalar": test_c_emul_auto_scalar, "c_trace": test_c_trace,
-           "c_trace_summary": test_c_trace_summary, "c_trace_auto_scalar": test_c_trace_auto_scalar,
+           "c_opt_guard": test_c_opt_guard, "c_run_test_superscalar": test_c_run_test_superscalar,
+           "c_emul_superscalar": test_c_emul_superscalar, "c_trace": test_c_trace,
+           "c_trace_summary": test_c_trace_summary, "c_trace_superscalar": test_c_trace_superscalar,
            "c_trace_cwd": test_c_trace_cwd}
 
 
@@ -787,6 +818,27 @@ def main():
         print(f"{'PASS' if ok else 'FAIL'}: {label}")
         passed += ok
         failed += not ok
+
+    # Same host programs on the superscalar pipeline: same results expected.
+    global SS_WIDTH
+    for width in SS_WIDTHS:
+        SS_WIDTH = width
+        runs = [(n, f"{n} {tpb} threads x {nb} blocks", lambda n=n, tpb=tpb, nb=nb, extra=extra: TESTS[n](tpb, nb, **extra))
+                for n, tpb, nb, extra in CASES if n in HOST_TESTS]
+        runs += [(n, f"{n} {opt}", lambda n=n, opt=opt: C_TESTS[n](opt)) for n, opt in C_CASES if n in HOST_C_TESTS]
+        for name, label, fn in runs:
+            if name not in args.kernels:
+                continue
+            label = f"{label} [superscalar width {width}]"
+            try:
+                ok = fn()
+            except Exception as e:
+                print(f"  [{label}] Exception: {e}")
+                ok = False
+            print(f"{'PASS' if ok else 'FAIL'}: {label}")
+            passed += ok
+            failed += not ok
+    SS_WIDTH = 0
 
     print(f"\n{passed}/{passed + failed} passed")
     print("ALL GRID TESTS PASSED" if failed == 0 else "SOME GRID TESTS FAILED")

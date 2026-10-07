@@ -12,10 +12,11 @@ _start:
     li   a0, 0x100000
     la   t0, kernel
     li   t1, (NB << 16) | TPB
-launch_at:
-    SIMT_LAUNCH t0, t1
     li   t2, 0x600D
     li   t3, MARKER_ADDR
-    sw   t2, 0(t3)           # must never run
+launch_at:
+    SIMT_LAUNCH t0, t1
+    sw   t2, 0(t3)           # must never run -- and, with its operands ready, it is the
+                             # instruction a superscalar CPU would co-issue with the LAUNCH
 _end:
     j    _end

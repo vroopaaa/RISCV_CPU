@@ -93,9 +93,9 @@ path is relative to it too), not next to the source file.
   `block B on SM S: W warps, N issued` line, and the launch with
   `launch done: device cycles ... (busiest: SM ...)`. `-gpu summary` keeps
   only those per-block lines. SIMT/LAUNCH instructions are shown by name
-  instead of objdump's raw `.insn`. A GPU program asked for `-mode
-  superscalar` is traced in scalar mode, with a note (LAUNCH isn't supported
-  in superscalar mode yet).
+  instead of objdump's raw `.insn`. With `-mode superscalar` the GPU section
+  is nested under the cycle that issued the LAUNCH — a LAUNCH always issues
+  alone in its cycle, and the CPU stalls there until the grid is done.
 
 Example:
 ```

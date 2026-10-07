@@ -159,6 +159,27 @@ static void trace_block(void* ctx, int sm, uint32_t block, uint32_t warps, uint6
     t->buf << "  |   block " << block << " on SM " << sm << ": " << warps << " warps, " << issued << " issued\n";
 }
 
+static std::string launch_text(const GridLauncher& gpu, const std::unordered_map<uint32_t, std::string>& symbols) {
+    auto sym = symbols.find(gpu.last_entry());
+    std::ostringstream l;
+    l << "LAUNCH " << (sym != symbols.end() ? sym->second : "<kernel>") << " "
+      << gpu.last_num_blocks() << " blocks x " << gpu.last_threads_per_block()
+      << " threads args=0x" << std::hex << gpu.last_args() << std::dec;
+    return l.str();
+}
+
+// The nested GPU part written under the host line that issued the LAUNCH.
+static void write_gpu_section(std::ostream& out, const GridLauncher& gpu, GpuTrace& t) {
+    if (t.full) out << "  +- GPU  sm\tblk\twarp\tsm_cycle\tpc\tmask\tinstruction\n";
+    out << t.buf.str();
+    uint32_t busiest = 0;
+    for (uint32_t sm = 1; sm < NUM_SMS; sm++)
+        if (gpu.sm_cycles((int)sm) > gpu.sm_cycles((int)busiest)) busiest = sm;
+    out << "  +- launch " << (gpu.faulted() ? "FAULTED" : gpu.timed_out() ? "TIMED OUT" : "done")
+        << ": device cycles " << gpu.sm_cycles((int)busiest) << " (busiest: SM " << busiest << "), "
+        << ((gpu.faulted() || gpu.timed_out()) ? "host halts" : "host resumes") << "\n";
+}
+
 static const char* npu_tag(uint8_t opcode, uint8_t funct3) {
     if (opcode != 0x0B) return "";
     switch (funct3) {
@@ -220,10 +241,14 @@ int main(int argc, char* argv[]) {
 
             int m = cpu.last_issue_count();
             std::ostringstream line;
+            bool launched = false;
             for (int i = 0; i < m; i++) {
                 uint32_t slot_pc = cpu.slot_pc(i);
-                auto it = dis_map.find(slot_pc);
-                std::string text = (it != dis_map.end()) ? it->second : "<unknown>";
+                std::string text = text_at(dis_map, slot_pc, memory.read_word(slot_pc));
+                if (cpu.issued_opcode(i) == CPU::OPCODE_LAUNCH && cpu.issued_funct3(i) == 0) {
+                    if (gpu.last_num_blocks() > 0) { text = launch_text(gpu, symbols); launched = true; }
+                    else text += "   <-- LAUNCH refused (see stderr)";
+                }
                 if (i > 0) line << " | ";
                 line << "0x" << std::hex << slot_pc << std::dec << ": " << text
                      << npu_tag(cpu.issued_opcode(i), cpu.issued_funct3(i));
@@ -233,6 +258,8 @@ int main(int argc, char* argv[]) {
             }
             out << cycles << "\t0x" << std::hex << base_pc << std::dec << "\t" << m
                 << "\t" << line.str() << "\n";
+            if (launched) write_gpu_section(out, gpu, gpu_trace);  // LAUNCH issues alone, so it's the only slot
+            gpu_trace.buf.str("");
             cycles++;
             total_instructions += m;
         }
@@ -254,27 +281,13 @@ int main(int argc, char* argv[]) {
             bool launched = (cpu.last_opcode() == CPU::OPCODE_LAUNCH && cpu.last_funct3() == 0 &&
                              gpu.last_num_blocks() > 0);
             if (launched) {
-                auto sym = symbols.find(gpu.last_entry());
-                std::ostringstream l;
-                l << "LAUNCH " << (sym != symbols.end() ? sym->second : "<kernel>") << " "
-                  << gpu.last_num_blocks() << " blocks x " << gpu.last_threads_per_block()
-                  << " threads args=0x" << std::hex << gpu.last_args() << std::dec;
-                text = l.str();
+                text = launch_text(gpu, symbols);
             } else if (cpu.last_opcode() == CPU::OPCODE_LAUNCH) {
                 text += "   <-- LAUNCH refused (see stderr)";
             }
             out << cycles << "\t0x" << std::hex << pc << std::dec << "\t" << text
                 << npu_tag(cpu.last_opcode(), cpu.last_funct3()) << "\n";
-            if (launched) {
-                if (gpu_full) out << "  +- GPU  sm\tblk\twarp\tsm_cycle\tpc\tmask\tinstruction\n";
-                out << gpu_trace.buf.str();
-                uint32_t busiest = 0;
-                for (uint32_t sm = 1; sm < NUM_SMS; sm++)
-                    if (gpu.sm_cycles((int)sm) > gpu.sm_cycles((int)busiest)) busiest = sm;
-                out << "  +- launch " << (gpu.faulted() ? "FAULTED" : gpu.timed_out() ? "TIMED OUT" : "done")
-                    << ": device cycles " << gpu.sm_cycles((int)busiest) << " (busiest: SM " << busiest << "), "
-                    << ((gpu.faulted() || gpu.timed_out()) ? "host halts" : "host resumes") << "\n";
-            }
+            if (launched) write_gpu_section(out, gpu, gpu_trace);
             gpu_trace.buf.str("");
             cycles++;
         }

@@ -115,6 +115,9 @@ private:
     // Which of rs1/rs2 a given opcode/funct3 actually reads (decode_one()
     // always populates both bit fields regardless of opcode).
     static void reg_usage(uint8_t opcode, uint8_t funct3, bool& uses_rs1, bool& uses_rs2);
+    // LAUNCH (0x5B), shared by read() and read_m(): runs the grid, adds the
+    // device cycles, halts if the GPU faulted or timed out.
+    void run_launch(uint8_t funct3, reg_t entry, reg_t dims, reg_t launch_pc);
 public:
     // Constructor
     CPU(Memory* mem_ptr);

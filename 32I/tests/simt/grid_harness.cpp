@@ -12,7 +12,7 @@
 // Host mode -- boots the scalar CPU at pc 0 with the GPU attached; the host
 // program launches kernels itself through the LAUNCH opcode (0x5B):
 //   grid_harness --host <bin_path> <max_cycles> <dump_base_hex> <dump_size_hex>
-//                       <dump_file_path> [no-gpu]
+//                       <dump_file_path> [no-gpu] [superscalar] [width=N]
 // Prints: halted=<0|1> cpu_cycles=<n> sm_cycles=<sm0>,<sm1>,...  (sm_cycles: last launch)
 #include <iostream>
 #include <string>
@@ -31,7 +31,7 @@ static void print_sm_cycles(const GridLauncher& gpu) {
 static int run_host(int argc, char* argv[]) {
     if (argc < 7) {
         std::cerr << "Usage: " << argv[0] << " --host <bin_path> <max_cycles> <dump_base_hex>"
-                  << " <dump_size_hex> <dump_file_path> [no-gpu]\n";
+                  << " <dump_size_hex> <dump_file_path> [no-gpu] [superscalar] [width=N]\n";
         return 1;
     }
     std::string bin_path  = argv[2];
@@ -39,7 +39,15 @@ static int run_host(int argc, char* argv[]) {
     uint32_t dump_base    = std::strtoul(argv[4], nullptr, 16);
     uint32_t dump_size    = std::strtoul(argv[5], nullptr, 16);
     std::string dump_path = argv[6];
-    bool attach           = !(argc > 7 && std::string(argv[7]) == "no-gpu");
+    bool attach = true, superscalar = false;
+    int width = 0;
+    for (int i = 7; i < argc; i++) {
+        std::string opt = argv[i];
+        if (opt == "no-gpu") attach = false;
+        else if (opt == "superscalar") superscalar = true;
+        else if (opt.rfind("width=", 0) == 0) width = std::atoi(opt.c_str() + 6);
+        else { std::cerr << "unknown host option " << opt << "\n"; return 1; }
+    }
 
     Memory memory(4 * 1024 * 1024); // tests/python/link.ld's RAM
     if (!load_binary(memory, bin_path, 0x0)) {
@@ -49,14 +57,24 @@ static int run_host(int argc, char* argv[]) {
     GridLauncher gpu(&memory, CPU::HOST_STACK_RESERVE); // the CPU owns the host stack reserve
     CPU cpu(&memory);
     if (attach) cpu.attach_gpu(&gpu);
+    if (superscalar && width > 0) cpu.set_issue_width(width);
 
-    // Same scalar loop as tests/basic/main.cpp.
+    // Same loops as tests/basic/main.cpp.
     for (long long i = 0; i < max_cycles && !cpu.is_halted(); i++) {
-        cpu.fetch();
-        cpu.decode();
-        cpu.execute();
-        cpu.read();
-        cpu.writeback();
+        if (superscalar) {
+            cpu.fetch_n();
+            cpu.decode_all();
+            cpu.hazard_scan();
+            cpu.execute_m();
+            cpu.read_m();
+            cpu.writeback_m();
+        } else {
+            cpu.fetch();
+            cpu.decode();
+            cpu.execute();
+            cpu.read();
+            cpu.writeback();
+        }
     }
 
     std::cout << "halted=" << (cpu.is_halted() ? 1 : 0) << " cpu_cycles=" << cpu.get_cycle_count();
