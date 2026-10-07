@@ -2,6 +2,7 @@
 #include <string>
 #include <cstdlib>
 #include "../../include/CPU.h"
+#include "../../include/GridLauncher.h"
 #include "../../include/memory.h"
 #include "loader.h"
 
@@ -53,6 +54,10 @@ int main(int argc, char* argv[]) {
     }
 
     CPU cpu(&memory);
+    // GPU for the LAUNCH opcode (0x5B) -- programs using simt_launch() work
+    // here too. The CPU owns the host stack reserve and hands it to the GPU.
+    GridLauncher gpu(&memory, CPU::HOST_STACK_RESERVE);
+    cpu.attach_gpu(&gpu);
     if (superscalar && issue_width > 0) {
         cpu.set_issue_width(issue_width);
     }

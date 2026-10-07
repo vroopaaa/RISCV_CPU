@@ -16,7 +16,21 @@
 // Custom-0 (opcode 0x0B) instructions get an inline NPU tag when present,
 // so they're easy to grep out of an otherwise scalar-instruction-heavy
 // trace; this is a no-op annotation on binaries that never use that opcode.
+//
+// GPU programs (LAUNCH, opcode 0x5B): the GPU's work is printed nested right
+// under the host's LAUNCH line, then the host trace carries on --
+//     57  0xfc  LAUNCH vec_add 5 blocks x 40 threads args=0x2a0
+//       +- GPU  sm  blk  warp  sm_cycle  pc  mask  instruction
+//       |   0   0    0     0         0x10  ffffffff  SIMT_BLOCK_IDX a5
+//       |   block 0 on SM 0: 2 warps, 46 issued
+//       +- launch done: device cycles 92 (busiest: SM 0), host resumes
+// Blocks appear in the order the emulator ran them; sm_cycle is each SM's own
+// count (SMs run in parallel in hardware, so every SM starts at 0), and mask
+// is the set of lanes that executed the instruction. Gpu mode "summary"
+// keeps only the per-block lines. Custom SIMT / LAUNCH instructions are
+// printed by name instead of objdump's raw ".insn 4, 0x...".
 #include "CPU.h"
+#include "GridLauncher.h"
 #include "memory.h"
 #include <fstream>
 #include <iostream>
@@ -25,6 +39,7 @@
 #include <string>
 #include <vector>
 #include <cctype>
+#include <iomanip>
 
 static bool load_binary(Memory& memory, const std::string& filepath, uint32_t base_addr) {
     std::ifstream file(filepath, std::ios::binary | std::ios::ate);
@@ -68,6 +83,82 @@ static std::unordered_map<uint32_t, std::string> load_disassembly(const std::str
     return map;
 }
 
+// Symbol header lines ("00000010 <vec_add>:") -> {0x10: "vec_add"}.
+static std::unordered_map<uint32_t, std::string> load_symbols(const std::string& path) {
+    std::unordered_map<uint32_t, std::string> map;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t lt = line.find(" <");
+        size_t gt = line.find(">:");
+        if (lt == std::string::npos || gt == std::string::npos || gt < lt) continue;
+        uint32_t addr;
+        try { addr = std::stoul(line.substr(0, lt), nullptr, 16); } catch (...) { continue; }
+        map[addr] = line.substr(lt + 2, gt - lt - 2);
+    }
+    return map;
+}
+
+static const char* REG_NAMES[32] = {
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"};
+
+// Name + operands for the custom SIMT (0x2B) and LAUNCH (0x5B) instructions,
+// "" for anything else (those keep objdump's text).
+static std::string custom_label(uint32_t word) {
+    uint32_t opcode = word & 0x7F;
+    uint32_t rd = (word >> 7) & 0x1F, funct3 = (word >> 12) & 0x7;
+    uint32_t rs1 = (word >> 15) & 0x1F, rs2 = (word >> 20) & 0x1F, funct7 = word >> 25;
+    std::string d = REG_NAMES[rd], a = REG_NAMES[rs1], b = REG_NAMES[rs2];
+    if (opcode == 0x5B) return (funct3 == 0) ? "LAUNCH " + a + "," + b : "LAUNCH? (reserved funct3)";
+    if (opcode != 0x2B) return "";
+    switch (funct3) {
+        case 0: return "SIMT_TMC " + a;
+        case 1: return "SIMT_WSPAWN " + a + "," + b;
+        case 2: return "SIMT_TID " + d;
+        case 3: return "SIMT_BAR " + a + "," + b;
+        case 4: return "SIMT_SPLIT " + a;
+        case 5: return "SIMT_JOIN";
+        case 6: return "SIMT_PRED " + a;
+        default:
+            switch (funct7) {
+                case 0: return "SIMT_BLOCK_IDX " + d;
+                case 1: return "SIMT_BLOCK_DIM " + d;
+                case 2: return "SIMT_GRID_DIM " + d;
+                case 3: return "SIMT_HW_TID " + d;
+                default: return "SIMT_IDENT? " + d;
+            }
+    }
+}
+
+static std::string text_at(const std::unordered_map<uint32_t, std::string>& dis_map, uint32_t pc, uint32_t word) {
+    std::string label = custom_label(word);
+    if (!label.empty()) return label;
+    auto it = dis_map.find(pc);
+    return (it != dis_map.end()) ? it->second : "<unknown>";
+}
+
+// GPU lines are collected while the LAUNCH runs (inside cpu.read()) and
+// written out after the host's LAUNCH line.
+struct GpuTrace {
+    const std::unordered_map<uint32_t, std::string>* dis_map;
+    bool full;
+    std::ostringstream buf;
+};
+
+static void trace_issue(void* ctx, const SIMTCore::TraceEvent& e) {
+    GpuTrace* t = (GpuTrace*)ctx;
+    if (!t->full) return;
+    t->buf << "  |   " << e.sm << "\t" << e.block << "\t" << e.warp << "\t" << e.sm_cycle
+           << "\t0x" << std::hex << e.pc << "\t" << std::setw(8) << std::setfill('0') << e.tmask
+           << std::setfill(' ') << std::dec << "\t" << text_at(*t->dis_map, e.pc, e.word) << "\n";
+}
+
+static void trace_block(void* ctx, int sm, uint32_t block, uint32_t warps, uint64_t issued) {
+    GpuTrace* t = (GpuTrace*)ctx;
+    t->buf << "  |   block " << block << " on SM " << sm << ": " << warps << " warps, " << issued << " issued\n";
+}
+
 static const char* npu_tag(uint8_t opcode, uint8_t funct3) {
     if (opcode != 0x0B) return "";
     switch (funct3) {
@@ -81,7 +172,7 @@ static const char* npu_tag(uint8_t opcode, uint8_t funct3) {
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "usage: trace_harness <bin> <disassembly.txt> <out.txt> [max_cycles] [mode] [issue_width]\n";
+        std::cerr << "usage: trace_harness <bin> <disassembly.txt> <out.txt> [max_cycles] [mode] [issue_width] [gpu: full|summary]\n";
         return 1;
     }
     std::string bin_path = argv[1];
@@ -91,12 +182,21 @@ int main(int argc, char* argv[]) {
     std::string mode = argc > 5 ? argv[5] : "scalar";
     int issue_width = argc > 6 ? std::atoi(argv[6]) : 0;
     bool superscalar = (mode == "superscalar");
+    bool gpu_full = !(argc > 7 && std::string(argv[7]) == "summary");
 
     auto dis_map = load_disassembly(dis_path);
+    auto symbols = load_symbols(dis_path);
 
     Memory memory(4 * 1024 * 1024);
     if (!load_binary(memory, bin_path, 0x0)) return 1;
     CPU cpu(&memory);
+    // Same GPU as tests/basic/main.cpp (emul), with tracing hooked in.
+    GridLauncher gpu(&memory, CPU::HOST_STACK_RESERVE);
+    cpu.attach_gpu(&gpu);
+    GpuTrace gpu_trace;
+    gpu_trace.dis_map = &dis_map;
+    gpu_trace.full = gpu_full;
+    gpu.set_trace(trace_issue, trace_block, &gpu_trace);
     if (superscalar && issue_width > 0) cpu.set_issue_width(issue_width);
 
     std::ofstream out(out_path);
@@ -149,10 +249,33 @@ int main(int argc, char* argv[]) {
             cpu.read();
             cpu.writeback();
 
-            auto it = dis_map.find(pc);
-            std::string text = (it != dis_map.end()) ? it->second : "<unknown>";
+            uint32_t word = memory.read_word(pc);
+            std::string text = text_at(dis_map, pc, word);
+            bool launched = (cpu.last_opcode() == CPU::OPCODE_LAUNCH && cpu.last_funct3() == 0 &&
+                             gpu.last_num_blocks() > 0);
+            if (launched) {
+                auto sym = symbols.find(gpu.last_entry());
+                std::ostringstream l;
+                l << "LAUNCH " << (sym != symbols.end() ? sym->second : "<kernel>") << " "
+                  << gpu.last_num_blocks() << " blocks x " << gpu.last_threads_per_block()
+                  << " threads args=0x" << std::hex << gpu.last_args() << std::dec;
+                text = l.str();
+            } else if (cpu.last_opcode() == CPU::OPCODE_LAUNCH) {
+                text += "   <-- LAUNCH refused (see stderr)";
+            }
             out << cycles << "\t0x" << std::hex << pc << std::dec << "\t" << text
                 << npu_tag(cpu.last_opcode(), cpu.last_funct3()) << "\n";
+            if (launched) {
+                if (gpu_full) out << "  +- GPU  sm\tblk\twarp\tsm_cycle\tpc\tmask\tinstruction\n";
+                out << gpu_trace.buf.str();
+                uint32_t busiest = 0;
+                for (uint32_t sm = 1; sm < NUM_SMS; sm++)
+                    if (gpu.sm_cycles((int)sm) > gpu.sm_cycles((int)busiest)) busiest = sm;
+                out << "  +- launch " << (gpu.faulted() ? "FAULTED" : gpu.timed_out() ? "TIMED OUT" : "done")
+                    << ": device cycles " << gpu.sm_cycles((int)busiest) << " (busiest: SM " << busiest << "), "
+                    << ((gpu.faulted() || gpu.timed_out()) ? "host halts" : "host resumes") << "\n";
+            }
+            gpu_trace.buf.str("");
             cycles++;
         }
         std::cerr << "Traced " << cycles << " instructions to " << out_path

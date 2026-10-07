@@ -247,6 +247,17 @@ uint64_t SIMTCore::run_block(const BlockLaunch& b, bool* timed_out, uint64_t max
     for (int w = 0; w < nwarps && !overran && !fault_raised; w++) {
         while (!warps[w].halted) {
             if (issued >= max_issues) { overran = true; break; }
+            if (trace_fn != nullptr) {
+                TraceEvent e;
+                e.sm = sm_id;
+                e.block = b.block_id;
+                e.warp = w;
+                e.sm_cycle = trace_cycle_base + issued;
+                e.pc = warps[w].pc;
+                e.word = memory->read_word(warps[w].pc);
+                e.tmask = warps[w].tmask;
+                trace_fn(trace_ctx, e);
+            }
             issue(w);
             issued++; // a faulting instruction still counts as issued
         }

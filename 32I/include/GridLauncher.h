@@ -34,6 +34,17 @@ class GridLauncher {
         void status_grid() const;                   // block->SM map + per-SM cycles of the last launch
         void status_sm(int sm_id) const;            // one SM's blocks + cycles of the last launch
 
+        // Tracing: issue_fn gets every warp instruction (see SIMTCore::TraceEvent),
+        // block_fn one call per finished block. Either may be null.
+        typedef void (*BlockTraceFn)(void* ctx, int sm, uint32_t block, uint32_t warps, uint64_t issued);
+        void set_trace(SIMTCore::IssueTraceFn issue_fn, BlockTraceFn block_fn, void* ctx);
+
+        // What the last launch_grid() was asked to run (for traces).
+        reg_t    last_entry() const { return entry_pc; }
+        reg_t    last_args() const { return kernel_args; }
+        uint32_t last_threads_per_block() const { return threads_per_block; }
+        uint32_t last_num_blocks() const { return nBlocks; }
+
         reg_t    stack_top() const { return device_stack_top; }
         uint64_t sm_cycles(int sm_id) const { return cycles_per_sm[sm_id]; } // last launch
         bool     timed_out() const { return grid_timed_out; }                 // last launch
@@ -50,6 +61,10 @@ class GridLauncher {
         uint32_t nBlocks = 0;
         bool verbose = false;
         bool grid_timed_out = false;
+        reg_t entry_pc = 0;
+        reg_t kernel_args = 0;
+        BlockTraceFn block_trace_fn = nullptr;
+        void* trace_ctx = nullptr;
         bool grid_faulted = false;
         uint64_t max_issues_per_block = 1000000; // run_block's default cap
         std::vector<SIMTCore> sm_cores;      // the SMs, all sharing one Memory*

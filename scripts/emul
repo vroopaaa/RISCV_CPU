@@ -60,12 +60,24 @@ ISA_DIR="$REPO_ROOT/$ISA"
 SRC="$(readlink -f "$SRC_ARG")"
 [ -f "$SRC" ] || { echo "error: no such file: $SRC_ARG" >&2; exit 1; }
 
+# GPU programs (simt_launch) run on the scalar CPU: LAUNCH isn't supported in
+# superscalar mode yet, so switch automatically instead of failing.
+if [ "$MODE" = "superscalar" ] && grep -q "simt_launch" "$SRC"; then
+    echo "note: $SRC_ARG uses simt_launch -- running in scalar mode (LAUNCH isn't supported in superscalar mode yet)"
+    MODE="scalar"
+fi
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # --- Cross-compile bare-metal for RV32IM ---
+# simt_isa.h (simt_launch, simt_split, ...) for CUDA-style programs -- 32I only.
+SIMT_INC=()
+if [ -d "$ISA_DIR/tests/simt" ]; then
+    SIMT_INC=(-I "$ISA_DIR/tests/simt")
+fi
 riscv64-unknown-elf-gcc \
-    -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding "$OPT" \
+    -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding "$OPT" "${SIMT_INC[@]}" \
     -T "$ISA_DIR/tests/python/link.ld" \
     -o "$WORKDIR/prog.elf" \
     "$ISA_DIR/tests/python/start.s" "$SRC"

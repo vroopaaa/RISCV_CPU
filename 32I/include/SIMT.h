@@ -90,6 +90,24 @@ public:
         return ((warp * THREADS_PER_WARP + thread) << 16) | (warp << 8) | thread;
     }
 
+    // ---- Tracing (used by scripts/lib/trace_harness.cpp; off by default) ----
+    // One event per issued warp instruction, reported just before it runs:
+    // tmask is the set of lanes that execute it.
+    struct TraceEvent {
+        int      sm;
+        uint32_t block;
+        int      warp;
+        uint64_t sm_cycle;   // this SM's own instruction count since the launch began
+        reg_t    pc;
+        uint32_t word;       // the raw instruction
+        uint32_t tmask;
+    };
+    typedef void (*IssueTraceFn)(void* ctx, const TraceEvent& e);
+    void set_issue_trace(IssueTraceFn fn, void* ctx) { trace_fn = fn; trace_ctx = ctx; }
+    // SM-local cycle the next run_block() starts counting from (the launcher
+    // passes this SM's total so far, so blocks on one SM continue the count).
+    void set_trace_cycle_base(uint64_t c) { trace_cycle_base = c; }
+
     // sm_id feeds IDENT_HW_TID / per-lane stack placement so several SMs sharing
     // one Memory never collide; defaults to 0 so single-SM callers are unchanged.
     explicit SIMTCore(Memory* mem, int sm_id = 0);
@@ -184,6 +202,9 @@ private:
     reg_t regfile[THREADS_PER_WARP][WARPS_RESIDENT][NUM_ARCH_REGS - 1];
     Warp  warps[WARPS_RESIDENT];
     bool  fault_raised = false;
+    IssueTraceFn trace_fn = nullptr;
+    void*        trace_ctx = nullptr;
+    uint64_t     trace_cycle_base = 0;
 
     // nullptr if an SM lane can run f; otherwise a short name for the error
     // message (e.g. "LAUNCH", "NPU", "SIMT_BAR", "LOAD" for a bad width).

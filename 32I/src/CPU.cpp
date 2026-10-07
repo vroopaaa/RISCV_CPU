@@ -1074,6 +1074,14 @@ void CPU::execute_m() {
 void CPU::read_m() {
     for (int i = 0; i < issueCount; i++) {
         if (windowCancelled[i]) continue;
+        // LAUNCH isn't supported on the superscalar path yet (plan phase E):
+        // stop instead of silently skipping the kernel.
+        if (windowDecoded[i].opcode == OPCODE_LAUNCH) {
+            std::cerr << "[CPU Error] LAUNCH at pc 0x" << std::hex << windowSlotPC[i] << std::dec
+                      << " not supported in superscalar mode -- halting\n";
+            halted = true;
+            return;
+        }
         read_one(windowDecoded[i], windowAluResult[i], windowMemRead[i], windowMemWrite[i], windowMemResult[i]);
     }
 }

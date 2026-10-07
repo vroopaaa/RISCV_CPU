@@ -30,7 +30,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 TRACE_ISA_DIR="$REPO_ROOT/32I"
 
 usage() {
-    echo "Usage: assemblyinstruction <file.c> [-save [name.txt]] [-trace [name.txt]] [-cycles N] [-O0|-O1|-O2|-O3|-Os|-Og|-Ofast] [-mode scalar|superscalar] [-n <issue_width>]" >&2
+    echo "Usage: assemblyinstruction <file.c> [-save [name.txt]] [-trace [name.txt]] [-cycles N] [-O0|-O1|-O2|-O3|-Os|-Og|-Ofast] [-mode scalar|superscalar] [-n <issue_width>] [-gpu full|summary]" >&2
     exit 1
 }
 
@@ -46,6 +46,7 @@ CYCLES=20000000
 OPT="-O0"
 MODE="scalar"
 WIDTH=0
+GPU_TRACE="full"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -87,6 +88,12 @@ while [ $# -gt 0 ]; do
             WIDTH="$1"
             shift
             ;;
+        -gpu)
+            shift
+            [ $# -gt 0 ] || usage
+            GPU_TRACE="$1"
+            shift
+            ;;
         *)
             usage
             ;;
@@ -101,6 +108,17 @@ esac
 
 SRC="$(readlink -f "$SRC_ARG")"
 [ -f "$SRC" ] || { echo "error: no such file: $SRC_ARG" >&2; exit 1; }
+case "$GPU_TRACE" in
+    full|summary) ;;
+    *) echo "error: -gpu must be 'full' or 'summary', got '$GPU_TRACE'" >&2; exit 1 ;;
+esac
+
+# GPU programs (simt_launch) run on the scalar CPU: LAUNCH isn't supported in
+# superscalar mode yet, so switch automatically (same rule as emul).
+if [ "$MODE" = "superscalar" ] && grep -q "simt_launch" "$SRC"; then
+    echo "note: $SRC_ARG uses simt_launch -- running in scalar mode (LAUNCH isn't supported in superscalar mode yet)" >&2
+    MODE="scalar"
+fi
 
 SRC_DIR="$(dirname "$SRC")"
 BASE="$(basename "$SRC")"
@@ -109,7 +127,7 @@ NAME="${BASE%.*}"
 ASM_OUT="$SRC_DIR/$NAME.s"
 OBJ_OUT="$SRC_DIR/$NAME.o"
 
-CFLAGS=(-march=rv32im -mabi=ilp32 -ffreestanding "$OPT")
+CFLAGS=(-march=rv32im -mabi=ilp32 -ffreestanding "$OPT" -I "$TRACE_ISA_DIR/tests/simt")  # simt_isa.h
 
 riscv64-unknown-elf-gcc "${CFLAGS[@]}" -S "$SRC" -o "$ASM_OUT"
 riscv64-unknown-elf-gcc "${CFLAGS[@]}" -c "$SRC" -o "$OBJ_OUT"
@@ -136,9 +154,11 @@ if [ "$TRACE" -eq 1 ]; then
     if [ -z "$TRACE_PATH" ]; then
         TRACE_PATH="$NAME.trace.txt"
     fi
+    # A relative (or default) trace path is saved in the directory the
+    # script is run from, not next to the source file.
     case "$TRACE_PATH" in
         /*) ;;
-        *) TRACE_PATH="$SRC_DIR/$TRACE_PATH" ;;
+        *) TRACE_PATH="$PWD/$TRACE_PATH" ;;
     esac
 
     WORKDIR="$(mktemp -d)"
@@ -146,7 +166,7 @@ if [ "$TRACE" -eq 1 ]; then
 
     # --- Cross-compile bare-metal for RV32IM (same shape as `emul 32I`) ---
     riscv64-unknown-elf-gcc \
-        -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding "$OPT" \
+        -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding "$OPT" -I "$TRACE_ISA_DIR/tests/simt" \
         -T "$TRACE_ISA_DIR/tests/python/link.ld" \
         -o "$WORKDIR/prog.elf" \
         "$TRACE_ISA_DIR/tests/python/start.s" "$SRC"
@@ -174,5 +194,5 @@ if [ "$TRACE" -eq 1 ]; then
     g++ -std=c++17 -Wall -Wextra -I"$TRACE_ISA_DIR/include" -O2 \
         -o "$WORKDIR/tracer" "$SCRIPT_DIR/lib/trace_harness.cpp" "${HARNESS_SRCS[@]}"
 
-    "$WORKDIR/tracer" "$WORKDIR/prog.bin" "$WORKDIR/prog.dis.txt" "$TRACE_PATH" "$CYCLES" "$MODE" "$WIDTH"
+    "$WORKDIR/tracer" "$WORKDIR/prog.bin" "$WORKDIR/prog.dis.txt" "$TRACE_PATH" "$CYCLES" "$MODE" "$WIDTH" "$GPU_TRACE"
 fi

@@ -131,7 +131,7 @@ GRID_HARNESS = $(BUILD_DIR)/grid_harness
 $(GRID_HARNESS): tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SIMT_DEPS) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ tests/simt/grid_harness.cpp tests/basic/loader.cpp $(SIMT_SRCS)
 
-run-grid-tests: $(GRID_HARNESS)
+run-grid-tests: $(GRID_HARNESS) $(TEST_TARGET)
 	python3 tests/simt/run_grid_tests.py
 
 run-simt-tests: run-simt-regfile-test run-simt-exec-tests run-grid-tests

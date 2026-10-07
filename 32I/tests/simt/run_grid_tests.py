@@ -38,7 +38,9 @@ RISCV_OBJCOPY = "riscv64-unknown-elf-objcopy"
 RISCV_OBJDUMP = "riscv64-unknown-elf-objdump"
 RISCV_NM = "riscv64-unknown-elf-nm"
 RISCV_FLAGS = ["-march=rv32im", "-mabi=ilp32", "-nostdlib", "-nostartfiles", "-ffreestanding",
-               "-Wl,-e,kernel", f"-Wa,-I{KERNEL_DIR}"]
+               f"-Wa,-I{KERNEL_DIR}", f"-I{SCRIPT_DIR}"]   # -I: simt_isa.h for the C tests
+START_S = os.path.join(PROJECT_ROOT, "tests", "python", "start.s")   # scalar host entry: sp, call main, halt
+RUN_TEST = os.path.join(PROJECT_ROOT, "build", "run_test")           # tests/basic/main.cpp -- what emul runs
 
 # Must match the hardware model (include/SIMT.h, include/GridLauncher.h, include/CPU.h).
 NUM_SMS = 4
@@ -72,23 +74,35 @@ def parse_dump_file(path):
     return values
 
 
-def build(name, extra_sources=(), sources=None, defsyms=None):
+def build(name, extra_sources=(), sources=None, defsyms=None, c_file=None, opt="-O0"):
     """sources: .s files in grid_tests/ in link order (default: just name.s);
-    the first one's .text lands at address 0, where the host CPU starts."""
+    the first one's .text lands at address 0, where the host CPU starts.
+    c_file: a C program instead (host main() + kernels), linked after the
+    scalar start.s and compiled at `opt`."""
     os.makedirs(BUILD_DIR, exist_ok=True)
     elf = os.path.join(BUILD_DIR, name + ".elf")
     binf = os.path.join(BUILD_DIR, name + ".bin")
-    srcs = [os.path.join(KERNEL_DIR, f + ".s") for f in (sources or [name])]
+    if c_file:
+        srcs = [START_S, os.path.join(KERNEL_DIR, c_file)]
+        entry = "_start"
+    else:
+        srcs = [os.path.join(KERNEL_DIR, f + ".s") for f in (sources or [name])]
+        entry = "_start" if sources else "kernel"
     syms = [f"-Wa,--defsym,{k}={v}" for k, v in (defsyms or {}).items()]
-    run([RISCV_CC, *RISCV_FLAGS, *syms, "-T", LINK_LD, "-o", elf, *srcs, *extra_sources])
+    run([RISCV_CC, *RISCV_FLAGS, opt, f"-Wl,-e,{entry}", *syms, "-T", LINK_LD, "-o", elf, *srcs, *extra_sources])
     run([RISCV_OBJCOPY, "-O", "binary", elf, binf])
     with open(os.path.join(BUILD_DIR, name + ".dis"), "w") as f:  # listing for RTL comparison
         f.write(run([RISCV_OBJDUMP, "-d", elf]).stdout)
     symbols = {}
-    for line in run([RISCV_NM, elf]).stdout.splitlines():
+    sizes = {}
+    for line in run([RISCV_NM, "-S", elf]).stdout.splitlines():
         parts = line.split()
         if len(parts) == 3:
             symbols[parts[2]] = int(parts[0], 16)
+        elif len(parts) == 4:                       # addr size type name
+            symbols[parts[3]] = int(parts[0], 16)
+            sizes[parts[3]] = int(parts[1], 16)
+    symbols["__sizes__"] = sizes
     return binf, symbols
 
 
@@ -419,6 +433,251 @@ def test_host_fault(tpb, nb, kernel):
     return ok
 
 
+# ---------------------------------------------------------------------
+# C programs (phase D): host main() + kernels in one C file, using the
+# simt_isa.h API, compiled by the stock gcc at several -O levels.
+# ---------------------------------------------------------------------
+
+# -O0 only for now: gcc's optimiser can move code onto the path of lanes that
+# SPLIT switched off (see simt_isa.h), so simt_isa.h refuses optimised builds.
+C_OPTS = ["-O0"]
+EMUL = os.path.join(PROJECT_ROOT, "..", "scripts", "emul")
+ASSEMBLYINSTRUCTION = os.path.join(PROJECT_ROOT, "..", "scripts", "assemblyinstruction")
+
+
+def s32(v):
+    v &= 0xFFFFFFFF
+    return v - (1 << 32) if v & 0x80000000 else v
+
+
+def run_c(c_file, opt, arrays):
+    """Builds c_file at opt, runs it on the host CPU with the GPU attached,
+    returns (result, {array name: list of words})."""
+    name = f"{c_file[:-2]}{opt}"
+    binf, sym = build(name, c_file=c_file, opt=opt)
+    sizes = sym["__sizes__"]
+    lo = min(sym[a] for a in arrays)
+    hi = max(sym[a] + sizes[a] for a in arrays)
+    r = run_host(binf, lo, (hi - lo) // 4, tag=name)
+    words = {a: r["dump"][(sym[a] - lo) // 4:(sym[a] - lo + sizes[a]) // 4] for a in arrays}
+    return r, words
+
+
+def c_common(r):
+    return compare("halted", [1], [int(r["halted"])])
+
+
+def test_c_vec_add(opt):
+    n, threads, blocks, poison = 190, 40, 5, 0xDEADBEEF
+    total = threads * blocks
+    r, w = run_c("c_vec_add.c", opt, ["vec_c"])
+    want = [((i * 3 + 1) + (1000 - i * 7)) & 0xFFFFFFFF if i < n else poison for i in range(total)]
+    return c_common(r) & compare("c", want, w["vec_c"]) & check_stderr(r)
+
+
+def test_c_identity(opt):
+    threads, blocks = 40, 9
+    r, w = run_c("c_identity.c", opt, ["out_block", "out_thread", "out_bdim", "out_gdim", "out_hw"])
+    gids = [(b, t) for b in range(blocks) for t in range(threads)]
+    ok = c_common(r)
+    ok &= compare("blockIdx", [b for b, t in gids], w["out_block"])
+    ok &= compare("threadIdx", [t for b, t in gids], w["out_thread"])
+    ok &= compare("blockDim", [threads] * len(gids), w["out_bdim"])
+    ok &= compare("gridDim", [blocks] * len(gids), w["out_gdim"])
+    ok &= compare("hw_tid", [hw_tid(b, t) for b, t in gids], w["out_hw"])   # also proves block -> SM map
+    return ok & check_stderr(r)
+
+
+def test_c_two_launches(opt):
+    n = 64 * 6
+    r, w = run_c("c_two_launches.c", opt, ["y", "z", "result"])
+    x = [i * 5 - 100 for i in range(n)]
+    y = [2 * v + 1 for v in x]
+    z = [2 * v for v in y]
+    ok = c_common(r)
+    ok &= compare("y", [v & 0xFFFFFFFF for v in y], w["y"])
+    ok &= compare("z", [v & 0xFFFFFFFF for v in z], w["z"])
+    ok &= compare("result", [sum(z) & 0xFFFFFFFF], w["result"])
+    return ok & check_stderr(r)
+
+
+def test_c_relu(opt):
+    n = 32 * 7
+    r, w = run_c("c_relu.c", opt, ["relu_out"])
+    x = [(i * 37) % 201 - 100 for i in range(n)]
+    want = [v if v >= 0 else -((-v) // 8) for v in x]     # C division truncates toward zero
+    return c_common(r) & compare("out", [v & 0xFFFFFFFF for v in want], w["relu_out"]) & check_stderr(r)
+
+
+def test_c_bad_launch(opt):
+    r, w = run_c("c_bad_launch.c", opt, ["out", "marker"])
+    ok = c_common(r)
+    ok &= compare("out", [0] * 256, w["out"])
+    ok &= compare("marker", [0x600D], w["marker"])
+    ok &= compare("sm_cycles", [0] * NUM_SMS, r["sm_cycles"])
+    return ok & check_stderr(r, ["threads_per_block 129", "nBlocks 0"])
+
+
+def test_c_emul(opt):
+    """The same vector-add binary through tests/basic/main.cpp (what emul and
+    run_test use): the GPU is attached there too, and main's self-check
+    returns the number of correct elements in a0."""
+    binf, sym = build(f"c_vec_add_emul{opt}", c_file="c_vec_add.c", opt=opt)
+    proc = run([RUN_TEST, binf, "5000000"])
+    m = re.findall(r"x10: 0x([0-9a-fA-F]+)", proc.stdout)
+    halted_ok = "x10" in proc.stdout and m
+    got = int(m[-1], 16) if halted_ok else -1
+    ok = compare("a0 (correct elements)", [200], [got])
+    lines = [l for l in proc.stderr.splitlines() if l.strip()]
+    for l in lines[:5]:
+        print(f"    stderr: unexpected {l!r}")
+    return ok and not lines
+
+
+def test_c_opt_guard(opt):
+    """An optimised build of a SIMT program must stop with a clear error."""
+    try:
+        build("c_vec_add_O2", c_file="c_vec_add.c", opt="-O2")
+    except RuntimeError as e:
+        return "SIMT programs must be compiled at -O0" in str(e) or (print(f"    wrong error: {str(e)[-300:]}") or False)
+    print("    -O2 build of a SIMT program was accepted")
+    return False
+
+
+def test_c_superscalar_guard(opt):
+    """run_test in superscalar mode (no emul in front of it): LAUNCH isn't
+    supported there yet, so it must halt with an error, never skip silently."""
+    binf, sym = build(f"c_vec_add_ss{opt}", c_file="c_vec_add.c", opt=opt)
+    proc = run([RUN_TEST, binf, "5000000", "0", "0", "", "superscalar"])
+    want = "not supported in superscalar mode -- halting"
+    lines = [l for l in proc.stderr.splitlines() if l.strip()]
+    ok = any(want in l and "[CPU Error] LAUNCH at pc" in l for l in lines)
+    if not ok:
+        print(f"    stderr: expected a line containing {want!r}, got {lines[:5]}")
+    return ok
+
+
+def test_c_emul_auto_scalar(opt):
+    """emul -mode superscalar on a program that calls simt_launch runs it in
+    scalar mode automatically, says so, and gets the right answer."""
+    proc = run([EMUL, "32I", os.path.join(KERNEL_DIR, "c_vec_add.c"), "5000000", opt, "-mode", "superscalar"])
+    m = re.findall(r"x10: 0x([0-9a-fA-F]+)", proc.stdout)
+    ok = compare("a0 (correct elements)", [200], [int(m[-1], 16) if m else -1])
+    note = "running in scalar mode"
+    if note not in proc.stdout + proc.stderr:
+        print(f"    expected a note containing {note!r}")
+        ok = False
+    if "Error" in proc.stderr:
+        print(f"    unexpected stderr: {proc.stderr.strip()[:300]}")
+        ok = False
+    return ok
+
+
+def run_trace(tag, extra_args=()):
+    """assemblyinstruction -trace on a copy of c_vec_add.c (the script writes
+    .s/.o next to its source, so keep that out of grid_tests/)."""
+    work = os.path.join(BUILD_DIR, f"trace_{tag}")
+    os.makedirs(work, exist_ok=True)
+    src = os.path.join(work, "c_vec_add.c")
+    with open(os.path.join(KERNEL_DIR, "c_vec_add.c")) as f, open(src, "w") as g:
+        g.write(f.read())
+    trace = os.path.join(work, "trace.txt")
+    proc = run([ASSEMBLYINSTRUCTION, src, "-trace", trace, *extra_args])
+    with open(trace) as f:
+        lines = f.read().splitlines()
+    return proc, lines
+
+
+GPU_LINE = re.compile(r"^\s+\|\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+0x([0-9a-f]+)\s+([0-9a-f]{8})\s+(.*)$")
+BLOCK_LINE = re.compile(r"block (\d+) on SM (\d+): (\d+) warps, (\d+) issued")
+
+
+def test_c_trace(opt):
+    """Host trace with the GPU part nested at the LAUNCH line: every issued
+    GPU instruction with SM / block / warp / SM-local cycle / pc / lane mask."""
+    proc, lines = run_trace("full")
+    threads, blocks, n = 40, 5, 190
+    ok = True
+    launch = [i for i, l in enumerate(lines) if "LAUNCH vec_add 5 blocks x 40 threads" in l]
+    ok &= compare("LAUNCH lines", [1], [len(launch)])
+    if not launch:
+        return False
+    gpu = [GPU_LINE.match(l) for l in lines]
+    gpu_rows = [m.groups() for m in gpu if m]
+    blocks_seen = [BLOCK_LINE.search(l).groups() for l in lines if BLOCK_LINE.search(l)]
+    ok &= compare("block -> SM", [(str(b), str(b % NUM_SMS), "2") for b in range(blocks)],
+                  [(b, sm, w) for b, sm, w, _ in blocks_seen])
+    # Every block's summary matches its own instruction lines.
+    per_block = {}
+    for sm, blk, warp, cyc, pc, mask, text in gpu_rows:
+        per_block[blk] = per_block.get(blk, 0) + 1
+    ok &= compare("issued per block", [int(i) for _, _, _, i in blocks_seen],
+                  [per_block.get(b, 0) for b, _, _, _ in blocks_seen])
+    # SM-local cycles: each SM counts from 0 on its first block; SM 0 runs blocks 0 then 4 back to back.
+    first_cycle = {}
+    for sm, blk, warp, cyc, pc, mask, text in gpu_rows:
+        first_cycle.setdefault(blk, int(cyc))
+    want_first = {"0": 0, "1": 0, "2": 0, "3": 0, "4": per_block.get("0", 0)}
+    ok &= compare("first sm_cycle per block", [want_first[b] for b in "01234"], [first_cycle.get(b, -1) for b in "01234"])
+    # Lane masks: warp 1 of every block has 8 live lanes; in block 4 they are all >= n, so after SPLIT none are on.
+    w1_b0 = [mask for sm, blk, warp, cyc, pc, mask, text in gpu_rows if blk == "0" and warp == "1"]
+    ok &= compare("block 0 warp 1 starts with 8 lanes", ["000000ff"], w1_b0[:1])
+    b4w1 = [(mask, text) for sm, blk, warp, cyc, pc, mask, text in gpu_rows if blk == "4" and warp == "1"]
+    split_at = [i for i, (mask, text) in enumerate(b4w1) if text.startswith("SIMT_SPLIT")]
+    ok &= compare("block 4 warp 1 has a SPLIT", [True], [bool(split_at)])
+    if split_at:
+        ok &= compare("mask at SPLIT", ["000000ff"], [b4w1[split_at[0]][0]])
+        ok &= compare("mask after SPLIT", ["00000000"], [b4w1[split_at[0] + 1][0]])
+    ok &= compare("SIMT labels instead of .insn", [True], [any(t.startswith("SIMT_BLOCK_IDX") for *_, t in gpu_rows)])
+    done = [l for l in lines if "launch done: device cycles" in l]
+    ok &= compare("launch done lines", [1], [len(done)])
+    busiest = per_block.get("0", 0) + per_block.get("4", 0)
+    ok &= compare("device cycles", [f"device cycles {busiest} (busiest: SM 0)"],
+                  [re.search(r"device cycles \d+ \(busiest: SM \d+\)", done[0]).group(0) if done else ""])
+    # The host resumes: there are host lines after the GPU section.
+    end = max(i for i, l in enumerate(lines) if "launch done" in l) if done else len(lines)
+    ok &= compare("host lines after the launch", [True], [any(re.match(r"^\d+\t0x", l) for l in lines[end + 1:])])
+    return ok
+
+
+def test_c_trace_summary(opt):
+    """-gpu summary: one line per block, no per-instruction GPU lines."""
+    proc, lines = run_trace("summary", ["-gpu", "summary"])
+    ok = compare("GPU instruction lines", [0], [sum(1 for l in lines if GPU_LINE.match(l))])
+    ok &= compare("block lines", [5], [sum(1 for l in lines if BLOCK_LINE.search(l))])
+    return ok
+
+
+def test_c_trace_auto_scalar(opt):
+    """-mode superscalar on a GPU program traces in scalar mode, with a note."""
+    proc, lines = run_trace("ss", ["-mode", "superscalar"])
+    ok = compare("note", [True], ["running in scalar mode" in proc.stdout + proc.stderr])
+    ok &= compare("GPU section present", [True], [any("launch done" in l for l in lines)])
+    return ok
+
+
+def test_c_trace_cwd(opt):
+    """With no path (or a relative one), the trace is saved in the directory the
+    script is run from -- not next to the source file."""
+    src_dir = os.path.join(BUILD_DIR, "trace_cwd_src")
+    run_dir = os.path.join(BUILD_DIR, "trace_cwd_run")
+    for d in (src_dir, run_dir):
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            if f.endswith(".txt"):
+                os.remove(os.path.join(d, f))
+    src = os.path.join(src_dir, "c_vec_add.c")
+    with open(os.path.join(KERNEL_DIR, "c_vec_add.c")) as f, open(src, "w") as g:
+        g.write(f.read())
+    ok = True
+    for args, name in ((["-trace"], "c_vec_add.trace.txt"), (["-trace", "mine.txt"], "mine.txt")):
+        proc = subprocess.run([ASSEMBLYINSTRUCTION, src, *args, "-gpu", "summary"], cwd=run_dir,
+                              capture_output=True, text=True)
+        ok &= compare(f"{name} saved in the run directory", [True], [os.path.exists(os.path.join(run_dir, name))])
+        ok &= compare(f"{name} not next to the source", [False], [os.path.exists(os.path.join(src_dir, name))])
+    return ok
+
+
 def refused(r):
     """A refused launch runs nothing: 0 cycles, every SM idle, output untouched."""
     return (compare("cycles", [0], [r["cycles"]]) & compare("sm_cycles", [0] * NUM_SMS, r["sm_cycles"])
@@ -478,17 +737,29 @@ CASES = [
     ("host_fault",        40,  5, {"kernel": "bad_instr"}),
     ("host_fault",        32,  3, {"kernel": "runaway"}),
 ]
+# C programs, each at every C_OPTS level: (test name, opt).
+C_CASES = [(name, opt) for name in ["c_vec_add", "c_identity", "c_two_launches", "c_relu",
+                                    "c_bad_launch", "c_emul", "c_opt_guard", "c_superscalar_guard",
+                                    "c_emul_auto_scalar", "c_trace", "c_trace_summary",
+                                    "c_trace_auto_scalar", "c_trace_cwd"] for opt in C_OPTS]
 TESTS = {"identity": test_identity, "stack": test_stack, "vec_add": test_vec_add,
          "divergent": test_divergent, "runaway": test_runaway,
          "bad_launch": test_bad_launch, "ram_too_small": test_ram_too_small,
          "host_launch": test_host_launch, "host_two_launches": test_host_two_launches,
          "host_bad_launch": test_host_bad_launch, "host_no_gpu": test_host_no_gpu,
          "bad_instr": test_bad_instr, "fence_ok": test_fence_ok, "host_fault": test_host_fault}
+C_TESTS = {"c_vec_add": test_c_vec_add, "c_identity": test_c_identity, "c_two_launches": test_c_two_launches,
+           "c_relu": test_c_relu, "c_bad_launch": test_c_bad_launch, "c_emul": test_c_emul,
+           "c_opt_guard": test_c_opt_guard, "c_superscalar_guard": test_c_superscalar_guard,
+           "c_emul_auto_scalar": test_c_emul_auto_scalar, "c_trace": test_c_trace,
+           "c_trace_summary": test_c_trace_summary, "c_trace_auto_scalar": test_c_trace_auto_scalar,
+           "c_trace_cwd": test_c_trace_cwd}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run grid-launch assembly kernel tests.")
-    parser.add_argument("--kernels", nargs="+", choices=sorted(TESTS), default=sorted(TESTS))
+    parser.add_argument("--kernels", nargs="+", choices=sorted(TESTS) + sorted(C_TESTS),
+                        default=sorted(TESTS) + sorted(C_TESTS))
     args = parser.parse_args()
 
     passed = failed = 0
@@ -498,6 +769,18 @@ def main():
         label = f"{name} {tpb} threads x {nb} blocks"
         try:
             ok = TESTS[name](tpb, nb, **extra)
+        except Exception as e:
+            print(f"  [{label}] Exception: {e}")
+            ok = False
+        print(f"{'PASS' if ok else 'FAIL'}: {label}")
+        passed += ok
+        failed += not ok
+    for name, opt in C_CASES:
+        if name not in args.kernels:
+            continue
+        label = f"{name} {opt}"
+        try:
+            ok = C_TESTS[name](opt)
         except Exception as e:
             print(f"  [{label}] Exception: {e}")
             ok = False

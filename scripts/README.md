@@ -39,7 +39,7 @@ emul 32I main.c 10000 -mode superscalar -n 2
 ## `assemblyinstruction` — disassemble, or trace, a C file
 
 ```
-assemblyinstruction <file.c> [-save [name.txt]] [-trace [name.txt]] [-cycles N] [-O0|-O1|-O2|-O3|-Os|-Og|-Ofast] [-mode scalar|superscalar] [-n <issue_width>]
+assemblyinstruction <file.c> [-save [name.txt]] [-trace [name.txt]] [-cycles N] [-O0|-O1|-O2|-O3|-Os|-Og|-Ofast] [-mode scalar|superscalar] [-n <issue_width>] [-gpu full|summary]
 ```
 
 Compiles `file.c` to RV32IM assembly (`<name>.s`) and an object file
@@ -63,6 +63,8 @@ every instruction in the real order it executed, loops repeated as many
 times as they really ran (columns: cycle number, PC, disassembled
 instruction; custom-0/NPU instructions get an inline `<-- NPU ...` tag) — to
 `<name>.trace.txt` (or the given path), instead of the static listing above.
+The trace is saved in the directory you run the command from (a relative
+path is relative to it too), not next to the source file.
 
 - `-trace` always runs against **32I** (the only tree with the
   halt-on-self-jump idiom the tracer's stop condition relies on) —
@@ -82,6 +84,18 @@ instruction; custom-0/NPU instructions get an inline `<-- NPU ...` tag) — to
   on it is exactly what `hazard_scan()` decided could co-issue that cycle.
   `-n <issue_width>` sets the fetch/issue window size (defaults to the
   CPU's own max, currently 4). Both are ignored without `-trace`.
+- GPU programs (ones that call `simt_launch`, see `32I/tests/simt/simt_isa.h`):
+  the GPU's work is printed nested under the host's `LAUNCH` line, then the
+  host trace carries on. Each GPU row is `sm  blk  warp  sm_cycle  pc  mask
+  instruction` — `sm_cycle` is that SM's own count (SMs run in parallel in
+  hardware, so each starts at 0) and `mask` is the set of lanes that ran the
+  instruction (watch it narrow after a `SIMT_SPLIT`). Every block ends with a
+  `block B on SM S: W warps, N issued` line, and the launch with
+  `launch done: device cycles ... (busiest: SM ...)`. `-gpu summary` keeps
+  only those per-block lines. SIMT/LAUNCH instructions are shown by name
+  instead of objdump's raw `.insn`. A GPU program asked for `-mode
+  superscalar` is traced in scalar mode, with a note (LAUNCH isn't supported
+  in superscalar mode yet).
 
 Example:
 ```
@@ -94,6 +108,7 @@ assemblyinstruction main.c -trace
 assemblyinstruction main.c -trace name.trace.txt -cycles 5000000
 assemblyinstruction main.c -trace -mode superscalar
 assemblyinstruction main.c -trace -mode superscalar -n 2
+assemblyinstruction vec_add.c -trace -gpu summary
 ```
 
 ## Requirements

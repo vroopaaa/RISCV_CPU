@@ -49,6 +49,8 @@ uint64_t GridLauncher::launch_grid(reg_t entry, uint32_t threads_per_block, uint
     }
     this->threads_per_block = threads_per_block;
     this->nBlocks = nBlocks;
+    entry_pc = entry;
+    kernel_args = args;
 
     // Sequential in the emulator; "parallel" only in the cycle accounting.
     for (uint32_t i = 0; i < nBlocks; i++) {
@@ -62,7 +64,13 @@ uint64_t GridLauncher::launch_grid(reg_t entry, uint32_t threads_per_block, uint
             device_stack_top,
         };
         bool block_timed_out = false;
-        cycles_per_sm[sm] += sm_cores[sm].run_block(block_info, &block_timed_out, max_issues_per_block);
+        sm_cores[sm].set_trace_cycle_base(cycles_per_sm[sm]);
+        uint64_t issued = sm_cores[sm].run_block(block_info, &block_timed_out, max_issues_per_block);
+        cycles_per_sm[sm] += issued;
+        if (block_trace_fn != nullptr) {
+            uint32_t warps = (threads_per_block + SIMTCore::THREADS_PER_WARP - 1) / SIMTCore::THREADS_PER_WARP;
+            block_trace_fn(trace_ctx, (int)sm, i, warps, issued);
+        }
         if (block_timed_out) {
             // A runaway kernel would burn the cap again on every remaining block.
             std::cerr << "[GridLauncher Error] block " << i << " timed out -- abandoning the remaining "
@@ -81,6 +89,12 @@ uint64_t GridLauncher::launch_grid(reg_t entry, uint32_t threads_per_block, uint
 
     if (verbose) status_grid();
     return max_sm_cycles();
+}
+
+void GridLauncher::set_trace(SIMTCore::IssueTraceFn issue_fn, BlockTraceFn block_fn, void* ctx) {
+    for (uint32_t sm = 0; sm < NUM_SMS; sm++) sm_cores[sm].set_issue_trace(issue_fn, ctx);
+    block_trace_fn = block_fn;
+    trace_ctx = ctx;
 }
 
 // Device cycles of the last launch: the busiest SM's total (SMs run in parallel).
