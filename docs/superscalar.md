@@ -39,6 +39,12 @@ cycle's window, since `pc` only advances by `4*m`.
 `hazard_scan()` scans the decoded window left to right, picking the largest
 prefix `m` that's safe to issue together this cycle:
 
+- **LAUNCH issues alone.** A grid launch (custom-2, `0x5B`, see
+  `docs/CUDA/plan.md` "Grid launch") cuts the window just before itself and
+  comes back as the only instruction of the next cycle, where the CPU stalls
+  until the GPU is done. It reads `a0` implicitly (a RAW dependency the
+  rs1/rs2 check can't see), it is a full memory barrier, and it can't be
+  undone, so it must never sit in a speculative slot -- slot 0 never is.
 - **Control hazard.** A branch/`jal`/`jalr` ends the window right after
   itself — `next_pc` isn't known until `execute_m()`, and this codebase does
   no speculation.

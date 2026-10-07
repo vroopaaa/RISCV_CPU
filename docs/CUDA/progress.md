@@ -212,20 +212,77 @@ hit the same two failure modes. `start_simt.s` and the `always_inline`
 requirement are therefore load-bearing parts of the toolchain contract now,
 documented in `plan.md`, not one-off fixes.
 
-## 6. Open work
+## 6. Grid launch -- the host CPU launches kernels (`docs/CUDA/grid_launch_plan.md`)
+
+Built in the plan's phase order, each phase gated by tests, on branch
+`cuda_prototype`.
+
+- **A -- an SM runs a whole block.** `SIMTCore` gained an `sm_id`, block
+  context, the identity ops (`SIMT_IDENT`: blockIdx/blockDim/gridDim/hw_tid)
+  and `run_block()`: ceil(block_dim/32) warps, the last one partly masked,
+  run one after another to completion, with a per-block issue cap so a
+  runaway kernel can't hang the host.
+- **B -- `GridLauncher`.** Round-robin blocks over 4 SMs; device cycles =
+  the busiest SM's total. Changed from the design: the **CPU owns the host
+  stack size** (`CPU::HOST_STACK_RESERVE`) and passes it into the
+  launcher's constructor, which carves the device stacks below it. Review
+  found two real bugs, fixed test-first: RAM too small for the stacks went
+  undetected (sp values outside RAM), and a timed-out block didn't stop the
+  grid (65535 blocks x the issue cap = effectively a hang).
+- **Testing methodology changed.** The first launcher test hand-encoded
+  instruction words in C++, and an encoder bug (an `addi` immediate that
+  didn't fit 12 bits) hid behind it. Replaced by hand-written **assembly**
+  kernels assembled by the real toolchain (`grid_tests/*.s`, SIMT ops from
+  `simt_macros.inc`) plus `run_grid_tests.py`, which computes expected
+  values independently in Python -- readable for RTL designers, and the
+  objdump listing doubles as a waveform reference. The hand-encoded
+  `run_block_test.cpp` / `grid_launcher_test.cpp` were folded in and deleted.
+- **C -- LAUNCH on the host CPU** (custom-2, `0x5B`). Review caught the
+  Makefile not rebuilding objects on header changes (a stale `main.o`
+  crashed `cpu_emulator` once `CPU`'s layout changed) and the tests
+  ignoring stderr; both fixed. **GPU faults** were added at the user's
+  request: anything an SM lane can't run used to be a silent no-op; now it
+  prints an error, raises a flag that abandons the grid, and the host CPU
+  checks the flag after the LAUNCH and halts.
+- **D -- the C API** (`simt_launch`, identity helpers) and C test programs.
+  Two compiler findings: (1) gcc -O2 merged the if/else SPLIT regions of
+  `c_relu.c` into one branch -> `simt_split()` now returns its predicate
+  through `"+r"` and kernels branch on that; (2) review then showed gcc can
+  also move code onto the path of lanes SPLIT switched off (a default value
+  computed only there: 22/64 right at -O2). That one can't be fixed in a
+  header, so **SIMT programs are -O0 only for now** (`#error` under
+  `__OPTIMIZE__`) -- the motivation for a real kernel compiler later.
+  `tests/basic/main.cpp` (emul's harness) now always attaches a GPU, and
+  `assemblyinstruction -trace` nests the GPU's work under the LAUNCH line.
+- **E -- LAUNCH on the superscalar CPU.** It issues alone and the CPU
+  stalls in that cycle; every host test reruns at issue widths 1/2/4/10.
+  The phase-D stopgaps (superscalar halt guard, automatic scalar mode in
+  emul/assemblyinstruction) were removed.
+- **F -- these docs.**
+
+## 7. Open work
 
 - **Phase 4 (scheduler)**: round-robin, scoreboard, `LOAD_LATENCY`. Needed
   before `WSPAWN`/`BAR` mean anything, and before more than one warp is
   ever actually driven (today a harness calls `reset_warp`/`issue`
   directly on warp 0 only).
-- **Phase 5 (NPU handoff)**: still just a documented no-op seam.
-- **Real vecadd verification target** (N=256, T=4 or T=32, W=4): not run
-  yet -- needs Phase 4 (for genuine warp interleaving across more than one
-  warp); toolchain integration itself is now done (see §5).
-- **`start_simt.s`'s per-lane stack (1KB/lane) is untested under real
-  pressure** -- fine for these four small kernels, but nothing checks for a
-  stack overflow into the next lane's slice if a future kernel has deeper
-  locals/recursion. No guard page or size assertion exists.
+- **Phase 5 (NPU handoff)**: not built; an NPU (`0x0B`) instruction on an
+  SM lane faults today (it used to be a silent no-op).
+- **Multi-warp vecadd** now runs through a real launch (`c_vec_add.c`,
+  `vec_add.s`: several blocks x several warps), but warps still run one
+  after another to completion -- genuine interleaving needs Phase 4.
+- **Per-lane stacks (1KB/lane) are unguarded** -- nothing checks for a
+  stack overflow into the next lane's slice, the 64KB host stack isn't
+  guarded against the device stacks either, and nothing stops a large
+  `.bss` from growing into the device-stack area.
+- **SIMT C programs are `-O0` only** (see `plan.md`, Toolchain point 3) --
+  lifting that needs a compiler that places SPLIT/JOIN itself.
+- **The host CPU still ignores unknown opcodes silently** (only the SM
+  lanes fault on them so far).
+- Small known gaps from review: `simt_launch` doesn't mask block/thread
+  counts above 0xFFFF; `simt_wspawn`/`simt_bar` lack `"memory"` clobbers;
+  LAUNCH ignores funct7 and doesn't validate the kernel address; a timed-out
+  kernel is reported to the host only by halting.
 - **`JALR` divergence**: leader-lane-only, no agreement check (see
   `plan.md`) -- acceptable for now, flagged as a known gap rather than a
   verified-safe design choice.

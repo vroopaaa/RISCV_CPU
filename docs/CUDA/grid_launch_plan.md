@@ -1,6 +1,15 @@
 # Grid launch -- host CPU launches kernels onto a multi-SM SIMT device
 
-**Status: design only, nothing below is implemented yet.** This extends
+**Status: implemented (phases A-F, branch `cuda_prototype`).** Where the
+build differs from this design, the current rules are in `docs/CUDA/plan.md`
+("Grid launch") and the reasons in `docs/CUDA/progress.md` section 6 -- in
+short: the CPU owns the host stack reserve and passes it to `GridLauncher`;
+an instruction an SM can't run faults (flag -> grid abandoned -> host CPU
+halts) instead of being a silent no-op; tests are assembly + C programs
+driven by `tests/simt/run_grid_tests.py`; C SIMT programs must be built at
+`-O0`; and the divergence pattern is `if (simt_split(c)) {...} simt_join();`.
+
+This extends
 `docs/CUDA/plan.md` (the single-warp SIMT engine, Phases 1-3) with the
 missing piece for practical use: a *program* -- ordinary C compiled for the
 scalar `CPU` -- launches a kernel itself, CUDA-style, instead of a C++ test

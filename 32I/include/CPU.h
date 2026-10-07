@@ -31,7 +31,8 @@ private:
                                  // addressable by any instruction. 64-bit: a grid launch can
                                  // add more cycles than fit in 32 bits.
     bool halted;                // Set by execute() when a jump/branch targets its own address
-                                 // (this codebase's halt idiom, e.g. start.s's `_end: j _end`)
+                                 // (this codebase's halt idiom, e.g. start.s's `_end: j _end`),
+                                 // and by run_launch() when a LAUNCH faulted or timed out on the GPU
     Memory* memory;            // Pointer to the memory object
     GridLauncher* gpu;         // GPU run by the LAUNCH opcode (0x5B); null = no GPU attached
     // Helper method to enforce hardware rules
