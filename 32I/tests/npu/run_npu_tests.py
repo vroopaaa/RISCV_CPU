@@ -182,7 +182,7 @@ def render_test_c(big_dim, tile_dim, A, B, out_path, template_path, template):
 def build_riscv_bin(c_path, name, opt=DEFAULT_OPT):
     elf_path = os.path.join(BUILD_DIR, name + ".elf")
     bin_path = os.path.join(BUILD_DIR, name + ".bin")
-    run([RISCV_CC, *RISCV_FLAGS, f"-{opt}", "-T", LINK_LD, "-o", elf_path, START_S, c_path])
+    run([RISCV_CC, *RISCV_FLAGS, f"-{opt}", "-I", SCRIPT_DIR, "-T", LINK_LD, "-o", elf_path, START_S, c_path])
     run([RISCV_OBJCOPY, "-O", "binary", elf_path, bin_path])
     return bin_path
 
@@ -278,6 +278,172 @@ def run_one(big_dim, seed, low, high, cycles, template, mode, issue_width, opt=D
     return True
 
 
+# ---------------------------------------------------------------------
+# Output stage (--output-stage): load_bias / store_c8 and their MMIO view.
+# Independent Python model of the stage, checked against the emulator on
+# a set of single-tile cases (see c_tests/output_stage_template.c).
+# ---------------------------------------------------------------------
+
+OUTPUT_STAGE_TEMPLATE = os.path.join(SCRIPT_DIR, "c_tests", "output_stage_template.c")
+RISCV_NM = "riscv64-unknown-elf-nm"
+TILE = DEFAULT_TILE_SIZE
+SUPERSCALAR_WIDTHS = [1, 2, 4, 10]
+
+
+def rshift(v, s):
+    """Rounding right shift, halves toward +inf (arithmetic >> floors)."""
+    return v if s == 0 else (v + (1 << (s - 1))) >> s
+
+
+def sat8(v):
+    return max(INT8_MIN, min(INT8_MAX, v))
+
+
+def output_stage_model(case, use_bias=True, macs=1):
+    """The int8 tile the output stage should produce: C starts as the bias
+    broadcast down every row (or 0), each MAC adds A x B over the M x N
+    region, then shift + clamp, zero outside M x N."""
+    a, b, bias = case["a"], case["b"], case["bias"]
+    out = []
+    for i in range(TILE):
+        for j in range(TILE):
+            if i < case["m"] and j < case["n"]:
+                acc = macs * sum(a[i * TILE + k] * b[k * TILE + j] for k in range(TILE))
+                if use_bias:
+                    acc += bias[j]
+                out.append(sat8(rshift(acc, case["shift"] & 31)))
+            else:
+                out.append(0)
+    return out
+
+
+def output_stage_expected(case):
+    """The 1024 bytes of out[] one case should leave behind (see the mode
+    list in c_tests/output_stage_template.c)."""
+    region = TILE * TILE * 4
+    mode = case["mode"]
+    if mode == 4:  # int32 C straight after load_bias: bias in every row
+        exp = []
+        for i in range(TILE):
+            for j in range(TILE):
+                w = case["bias"][j] & 0xFFFFFFFF
+                exp += [((w >> (8 * k)) & 0xFF) for k in range(4)]
+        return [v - 256 if v >= 128 else v for v in exp]
+    if mode == 2:
+        exp = output_stage_model(case) + output_stage_model(case, use_bias=False)
+    elif mode == 3:
+        exp = output_stage_model(case, macs=2)
+    else:
+        exp = output_stage_model(case)
+    return exp + [0] * (region - len(exp))
+
+
+def output_stage_cases(rng):
+    def tile(lo=INT8_MIN, hi=INT8_MAX):
+        return [rng.randint(lo, hi) for _ in range(TILE * TILE)]
+
+    def bias(lo, hi):
+        return [rng.randint(lo, hi) for _ in range(TILE)]
+
+    def case(a, b, bias_, m=TILE, n=TILE, shift=9, mode=0, what=""):
+        return {"a": a, "b": b, "bias": bias_, "m": m, "n": n, "shift": shift, "mode": mode, "what": what}
+
+    cases = []
+    for s in (0, 1, 7, 31):
+        cases.append(case(tile(), tile(), bias(-5000, 5000), shift=s, what=f"shift {s}"))
+    cases.append(case(tile(), tile(), [0] * TILE, what="zero bias"))
+    cases.append(case(tile(), tile(), bias(1, 200000), what="positive bias"))
+    cases.append(case(tile(), tile(), bias(-200000, -1), what="negative bias"))
+    cases.append(case([-128] * 256, [-128] * 256, [0] * TILE, shift=0, what="saturate +127"))
+    cases.append(case([-128] * 256, [127] * 256, [0] * TILE, shift=0, what="saturate -128"))
+    # Rounding: only k = 0 is non-zero, so acc(i, j) = a(i, 0) * b(0, j) +
+    # bias[j] walks through odd/even values of both signs -- exact halves
+    # before the shift.
+    a_col = [0] * 256
+    for i in range(TILE):
+        a_col[i * TILE] = i - 8
+    b_row = [0] * 256
+    for j in range(TILE):
+        b_row[j] = 1 + (j % 3)
+    cases.append(case(a_col, b_row, list(range(-8, 8)), shift=1, what="rounding, shift 1"))
+    cases.append(case(a_col, b_row, list(range(-8, 8)), shift=2, what="rounding, shift 2"))
+    for m, n in ((5, 16), (16, 3), (1, 1)):
+        cases.append(case(tile(), tile(), bias(1000, 100000), m=m, n=n, what=f"edge mask {m}x{n}"))
+    cases.append(case(tile(), tile(), bias(-5000, 5000), mode=1, what="MMIO path"))
+    cases.append(case(tile(), tile(), bias(1000, 100000), m=7, n=9, mode=1, what="MMIO path, edge mask 7x9"))
+    cases.append(case(tile(), tile(), bias(1000, 100000), mode=2, what="RESET clears the bias"))
+    cases.append(case(tile(), tile(), bias(-100000, 100000), shift=10, mode=3, what="MACs accumulate onto the bias"))
+    cases.append(case(tile(), tile(), bias(-2**31 + 1, 2**31 - 1), mode=4, what="load_bias broadcasts into C"))
+    return cases
+
+
+def render_output_stage_c(cases, out_path):
+    def arr(vals):
+        return "{" + ", ".join(str(v) for v in vals) + "}"
+    rows = [f"    {{ {arr(c['a'])}, {arr(c['b'])}, {arr(c['bias'])}, "
+            f"{c['m']}, {c['n']}, {c['shift']}, {c['mode']} }}," for c in cases]
+    with open(OUTPUT_STAGE_TEMPLATE) as f:
+        src = f.read()
+    src = src.replace("{{NUM_CASES}}", str(len(cases))).replace("{{CASES}}", "\n".join(rows))
+    with open(out_path, "w") as f:
+        f.write(src)
+
+
+def symbol_address(elf_path, symbol):
+    out = run([RISCV_NM, elf_path]).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == symbol:
+            return int(parts[0], 16)
+    raise RuntimeError(f"symbol {symbol} not found in {elf_path}")
+
+
+def dump_bytes(path):
+    """Memory::dump_range's words, unpacked to signed bytes (little-endian)."""
+    out = []
+    for w in parse_dump_file(path):
+        w &= 0xFFFFFFFF
+        for i in range(4):
+            b = (w >> (8 * i)) & 0xFF
+            out.append(b - 256 if b >= 128 else b)
+    return out
+
+
+def run_output_stage(seed, opt, harness):
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    cases = output_stage_cases(random.Random(seed))
+    name = f"output_stage_{opt}"
+    c_path = os.path.join(BUILD_DIR, name + ".c")
+    render_output_stage_c(cases, c_path)
+    bin_path = build_riscv_bin(c_path, name, opt)
+    out_addr = symbol_address(os.path.join(BUILD_DIR, name + ".elf"), "out")
+
+    expected = []
+    for c in cases:
+        expected += output_stage_expected(c)
+
+    all_passed = True
+    for mode, width in [("scalar", 0)] + [("superscalar", w) for w in SUPERSCALAR_WIDTHS]:
+        desc = "scalar" if mode == "scalar" else f"superscalar width {width}"
+        dump_path = os.path.join(BUILD_DIR, f"{name}_{mode}{width}.dump.txt")
+        run_simulator(harness, bin_path, 2000000, out_addr, len(expected), dump_path, mode, width)
+        actual = dump_bytes(dump_path)[:len(expected)]
+        region = TILE * TILE * 4
+        bad = [c for c in range(len(cases))
+               if actual[c * region:(c + 1) * region] != expected[c * region:(c + 1) * region]]
+        if len(actual) < len(expected) or bad:
+            all_passed = False
+            print(f"FAIL: output stage, -{opt}, {desc}")
+            for c in bad[:8]:
+                lo = c * region
+                k = next(i for i in range(region) if actual[lo + i] != expected[lo + i])
+                print(f"  case {c} ({cases[c]['what']}): byte {k} "
+                      f"expected {expected[lo + k]}, got {actual[lo + k]}")
+        else:
+            print(f"PASS: output stage, -{opt}, {desc} ({len(cases)} cases bit-exact)")
+    return all_passed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run NPU matmul tests against the emulator.")
     parser.add_argument("--sizes", type=int, nargs="+", default=[16, 32, 256],
@@ -300,10 +466,21 @@ def main():
                               "Ignored in scalar mode.")
     parser.add_argument("--opt", choices=["O0", "O1", "O2", "O3", "Os", "Og", "Ofast"], default=DEFAULT_OPT,
                          help=f"C compiler optimization level (default: {DEFAULT_OPT})")
+    parser.add_argument("--output-stage", action="store_true",
+                         help="Test the NPU output stage (load_bias / store_c8 and its MMIO view) "
+                              "instead of the matmul, scalar and superscalar widths 1/2/4/10")
     args = parser.parse_args()
 
     print(f"Building simulator test harness for tile size {args.tile_size}x{args.tile_size}...")
     harness = build_harness(args.tile_size)
+
+    if args.output_stage:
+        if args.tile_size != DEFAULT_TILE_SIZE:
+            parser.error("--output-stage needs the default 16x16 tile")
+        passed = run_output_stage(args.seed, args.opt, harness)
+        print()
+        print("ALL TESTS PASSED" if passed else "SOME TESTS FAILED")
+        sys.exit(0 if passed else 1)
 
     all_passed = True
     for big_dim in args.sizes:

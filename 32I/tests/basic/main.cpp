@@ -43,10 +43,11 @@ int main(int argc, char* argv[]) {
     std::cout << "Loading: " << bin_path << " | Cycles: " << num_cycles
                << " | Mode: " << mode << std::endl;
 
-    // 4MB: matches tests/python/link.ld's LENGTH = 4M (bumped from 1M so
+    // 64MB: matches tests/python/link.ld's LENGTH = 64M (1M -> 4M so
     // larger NPU matmul tests' result region, at a fixed offset past the
-    // A/B data, has room without colliding with the 1MB boundary).
-    Memory memory(4 * 1024 * 1024);
+    // A/B data, has room without colliding with the 1MB boundary; 4M -> 64M
+    // for SparseViT's weights and activations).
+    Memory memory(64 * 1024 * 1024);
 
     if (!load_binary(memory, bin_path, 0x0)) {
         std::cerr << "Failed to load test binary. Exiting.\n";

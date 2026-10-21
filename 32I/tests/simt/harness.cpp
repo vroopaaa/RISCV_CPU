@@ -25,9 +25,9 @@ int main(int argc, char* argv[]) {
     uint32_t dump_size = std::strtoul(argv[4], nullptr, 16);
     std::string dump_path = argv[5];
 
-    // Same 4MB RAM as tests/python/link.ld's RAM region (the kernel is
+    // Same 64MB RAM as tests/python/link.ld's RAM region (the kernel is
     // linked against that same linker script).
-    Memory memory(4 * 1024 * 1024);
+    Memory memory(64 * 1024 * 1024);
     if (!load_binary(memory, bin_path, 0x0)) {
         std::cerr << "Failed to load " << bin_path << "\n";
         return 1;

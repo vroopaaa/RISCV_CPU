@@ -49,7 +49,7 @@ static int run_host(int argc, char* argv[]) {
         else { std::cerr << "unknown host option " << opt << "\n"; return 1; }
     }
 
-    Memory memory(4 * 1024 * 1024); // tests/python/link.ld's RAM
+    Memory memory(64 * 1024 * 1024); // tests/python/link.ld's RAM
     if (!load_binary(memory, bin_path, 0x0)) {
         std::cerr << "Failed to load " << bin_path << "\n";
         return 1;
@@ -100,7 +100,7 @@ int main(int argc, char* argv[]) {
     uint32_t dump_base         = std::strtoul(argv[7], nullptr, 16);
     uint32_t dump_size         = std::strtoul(argv[8], nullptr, 16);
     std::string dump_path      = argv[9];
-    uint32_t ram_bytes         = (argc > 10) ? std::strtoul(argv[10], nullptr, 16) : 4 * 1024 * 1024;
+    uint32_t ram_bytes         = (argc > 10) ? std::strtoul(argv[10], nullptr, 16) : 64 * 1024 * 1024;
     uint32_t host_reserve      = (argc > 11) ? std::strtoul(argv[11], nullptr, 16) : CPU::HOST_STACK_RESERVE;
 
     // The host keeps the top host_reserve bytes of RAM for its stack.
