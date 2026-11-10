@@ -13,6 +13,7 @@
 //                                                stacked rows, one thread per row
 //   5. O   = P_h . V_h for every batch b and      NPU: nn_gemm, one call per
 //      head h, the heads side by side in O        (b, h), on views into P, QKV, O
+//   6. A   = O . Wo, no bias                      NPU: nn_gemm
 //
 // Every tensor is in CRUDA's padded 16 x 16 tile layout (nn.h). Compiled
 // -O2; the GPU lego files -O0.
@@ -45,6 +46,11 @@ static const int8_t Wqkv[] __attribute__((aligned(NN_TILE_BYTES))) = {
 };
 _Static_assert(sizeof Wqkv == VIT_DIM * VIT_QKV, "the Wqkv file doesn't match vit.h's sizes");
 
+static const int8_t Wo[] __attribute__((aligned(NN_TILE_BYTES))) = {
+#include "input/tile_major/Wo_384_384.txt"
+};
+_Static_assert(sizeof Wo == VIT_DIM * VIT_DIM, "the Wo file doesn't match vit.h's sizes");
+
 // nn_layernorm takes per-column gamma and beta; no weights means gamma = 1.0
 // and beta = 0 in every column.
 static int8_t  ln_gamma[VIT_DIM];
@@ -54,6 +60,7 @@ static int8_t XN[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   
 static int8_t QKV[VIT_ROWS * VIT_QKV] __attribute__((aligned(NN_TILE_BYTES)));   // Q | K | V
 static int8_t S[VIT_S_ROWS * VIT_BATCH] __attribute__((aligned(NN_TILE_BYTES))); // scores
 static int8_t P[VIT_S_ROWS * VIT_BATCH] __attribute__((aligned(NN_TILE_BYTES))); // probabilities
+static int8_t O[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));     // head outputs
 
 static const uint16_t exp_table[] = {
 #include "input/exp_table_256.txt"
@@ -62,7 +69,7 @@ _Static_assert(sizeof exp_table == 256 * sizeof(uint16_t), "the exp table must h
 
 // Read by run_vit.py after the run: the output (tile layout), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // head outputs O
+int8_t         vit_out[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // projection A
 const uint32_t vit_out_rows = VIT_ROWS;
 const uint32_t vit_out_cols = VIT_DIM;
 uint64_t       vit_cycles;
@@ -71,6 +78,7 @@ uint64_t       vit_cycles_qkv;
 uint64_t       vit_cycles_scores;
 uint64_t       vit_cycles_softmax;
 uint64_t       vit_cycles_pv;
+uint64_t       vit_cycles_proj;
 
 // Step 3. For batch b and head h, in tiles (tile = 16 x 16):
 //   Q_h  = QKV rows of batch b, columns h * 64 ..       2 x 4 tiles at tile (2b, 4h)
@@ -135,14 +143,18 @@ int main(void) {
     uint64_t t3 = nn_cycles();
     r |= nn_softmax(S, VIT_LDT_S, P, VIT_LDT_S, VIT_S_ROWS, VIT_BATCH, exp_table);
     uint64_t t4 = nn_cycles();
-    r |= weighted_values(P, QKV, vit_out, VIT_PV_SHIFT);
+    r |= weighted_values(P, QKV, O, VIT_PV_SHIFT);
     uint64_t t5 = nn_cycles();
+    r |= nn_gemm(O, VIT_LDT, Wo, VIT_LDT, 0,
+                 vit_out, VIT_LDT, VIT_ROWS, VIT_DIM, VIT_DIM, VIT_PROJ_SHIFT);
+    uint64_t t6 = nn_cycles();
 
     vit_cycles_layernorm = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
     vit_cycles_scores    = t3 - t2;
     vit_cycles_softmax   = t4 - t3;
     vit_cycles_pv        = t5 - t4;
-    vit_cycles           = t5 - t0;
+    vit_cycles_proj      = t6 - t5;
+    vit_cycles           = t6 - t0;
     return r;
 }

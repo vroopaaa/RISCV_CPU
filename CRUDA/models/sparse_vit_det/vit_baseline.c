@@ -11,6 +11,7 @@
 //   4. P   = softmax of every row of S                   VIT_S_ROWS x VIT_BATCH
 //   5. O   = P_h . V_h for every batch and head, the     VIT_ROWS x VIT_DIM
 //      heads side by side (head h = columns h * 64 ..)
+//   6. A   = O . Wo, no bias                              VIT_ROWS x VIT_DIM
 //
 // Tensors are plain row-major int8 arrays. Compiled -O2.
 #include <stdint.h>
@@ -28,6 +29,11 @@ static const int8_t Wqkv[] = {
 };
 _Static_assert(sizeof Wqkv == VIT_DIM * VIT_QKV, "the Wqkv file doesn't match vit.h's sizes");
 
+static const int8_t Wo[] = {
+#include "input/row_major/Wo_384_384.txt"
+};
+_Static_assert(sizeof Wo == VIT_DIM * VIT_DIM, "the Wo file doesn't match vit.h's sizes");
+
 static int8_t XN[VIT_ROWS * VIT_DIM];    // LayerNorm output
 static const uint16_t exp_table[] = {
 #include "input/exp_table_256.txt"
@@ -37,10 +43,11 @@ _Static_assert(sizeof exp_table == 256 * sizeof(uint16_t), "the exp table must h
 static int8_t QKV[VIT_ROWS * VIT_QKV];   // Q | K | V
 static int8_t S[VIT_S_ROWS * VIT_BATCH]; // scores
 static int8_t P[VIT_S_ROWS * VIT_BATCH]; // probabilities
+static int8_t O[VIT_ROWS * VIT_DIM];     // head outputs, side by side
 
 // Read by run_vit.py after the run: the output (row-major), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_ROWS * VIT_DIM];          // the head outputs O
+int8_t         vit_out[VIT_ROWS * VIT_DIM];          // the projection A
 const uint32_t vit_out_rows = VIT_ROWS;
 const uint32_t vit_out_cols = VIT_DIM;
 uint64_t       vit_cycles;
@@ -49,6 +56,7 @@ uint64_t       vit_cycles_qkv;
 uint64_t       vit_cycles_scores;
 uint64_t       vit_cycles_softmax;
 uint64_t       vit_cycles_pv;
+uint64_t       vit_cycles_proj;
 
 // Floor square root of v, bit by bit.
 static uint32_t isqrt64(uint64_t v) {
@@ -198,14 +206,17 @@ int main(void) {
     uint64_t t3 = nn_cycles();
     softmax(S, P, VIT_S_ROWS, VIT_BATCH, exp_table);
     uint64_t t4 = nn_cycles();
-    weighted_values(P, QKV, vit_out, VIT_PV_SHIFT);
+    weighted_values(P, QKV, O, VIT_PV_SHIFT);
     uint64_t t5 = nn_cycles();
+    matmul(O, Wo, vit_out, VIT_ROWS, VIT_DIM, VIT_DIM, VIT_PROJ_SHIFT);
+    uint64_t t6 = nn_cycles();
 
     vit_cycles_layernorm = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
     vit_cycles_scores    = t3 - t2;
     vit_cycles_softmax   = t4 - t3;
     vit_cycles_pv        = t5 - t4;
-    vit_cycles           = t5 - t0;
+    vit_cycles_proj      = t6 - t5;
+    vit_cycles           = t6 - t0;
     return 0;
 }

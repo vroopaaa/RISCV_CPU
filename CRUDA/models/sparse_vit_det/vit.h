@@ -73,4 +73,8 @@ _Static_assert(VIT_HEAD_DIM == 64, "VIT_SCORE_SHIFT assumes sqrt(head dim) = 8")
 // at f = 5.
 #define VIT_PV_SHIFT 7u
 
+// Output projection: A = O . Wo, no bias. Wo has f = 9, so the int32 sum has
+// f = 5 + 9 = 14; shifting by 9 leaves A at f = 5.
+#define VIT_PROJ_SHIFT 9u
+
 #endif // VIT_H

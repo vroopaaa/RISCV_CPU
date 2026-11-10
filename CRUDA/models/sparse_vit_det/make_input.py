@@ -13,6 +13,7 @@ Files (<rows>_<cols> is the matrix size):
                       from VIT_NUM_BATCHES.
   Wqkv_384_1152.txt   QKV projection weight, K x N = in x out (Q | K | V
                       column blocks of 384)
+  Wo_384_384.txt      attention output projection weight, in x out
 
   input/exp_table_256.txt   softmax's exp table, 256 uint16 values (a vector
                       has no row/tile order, so it is written once):
@@ -67,12 +68,14 @@ def main():
     rng = np.random.default_rng(args.seed)
     X = randn8(rng, (max(BATCH_COUNTS) * BATCH, DIM))
     Wqkv = randn8(rng, (DIM, QKV))
+    Wo = randn8(rng, (DIM, DIM))          # drawn after Wqkv: the earlier files don't change
 
     for n in BATCH_COUNTS:
         rows = n * BATCH
         write(f"X_{rows}_{DIM}", X[:rows],
               f"input X, {n} batch{'es' if n > 1 else ''} of {BATCH} rows", args.seed)
     write(f"Wqkv_{DIM}_{QKV}", Wqkv, "QKV projection weight Wqkv, in x out", args.seed)
+    write(f"Wo_{DIM}_{DIM}", Wo, "attention output projection weight Wo, in x out", args.seed)
 
     table = ref.exp_table(1 / 16).tolist()
     with open(os.path.join(HERE, "input", "exp_table_256.txt"), "w") as f:
