@@ -77,4 +77,13 @@ _Static_assert(VIT_HEAD_DIM == 64, "VIT_SCORE_SHIFT assumes sqrt(head dim) = 8")
 // f = 5 + 9 = 14; shifting by 9 leaves A at f = 5.
 #define VIT_PROJ_SHIFT 9u
 
+// First residual: X1 = X + A. Both have f = 5; the sum keeps one more
+// integer bit by dropping to f = 4 (-8 .. +7.94): X1 = sat8(rshift(X + A, 1)).
+// At f = 5 it would clip (|X + A| reaches about 5), and the residual stream
+// grows from block to block.
+#define VIT_RES_SHIFT 1u
+
+// LN2 = LayerNorm(X1), no learned weights: same as the first LayerNorm (the
+// input's scale doesn't matter), output at f = VIT_LN_FRAC.
+
 #endif // VIT_H
