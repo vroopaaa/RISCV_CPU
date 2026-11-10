@@ -9,6 +9,8 @@
 //   3. S   = Q_h . K_h^T / 8 for every batch and head     VIT_S_ROWS x VIT_BATCH
 //      (one 32 x 32 matrix per (batch b, head h), stored as slot b * 6 + h)
 //   4. P   = softmax of every row of S                   VIT_S_ROWS x VIT_BATCH
+//   5. O   = P_h . V_h for every batch and head, the     VIT_ROWS x VIT_DIM
+//      heads side by side (head h = columns h * 64 ..)
 //
 // Tensors are plain row-major int8 arrays. Compiled -O2.
 #include <stdint.h>
@@ -34,17 +36,19 @@ _Static_assert(sizeof exp_table == 256 * sizeof(uint16_t), "the exp table must h
 
 static int8_t QKV[VIT_ROWS * VIT_QKV];   // Q | K | V
 static int8_t S[VIT_S_ROWS * VIT_BATCH]; // scores
+static int8_t P[VIT_S_ROWS * VIT_BATCH]; // probabilities
 
 // Read by run_vit.py after the run: the output (row-major), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_S_ROWS * VIT_BATCH];      // the probabilities P
-const uint32_t vit_out_rows = VIT_S_ROWS;
-const uint32_t vit_out_cols = VIT_BATCH;
+int8_t         vit_out[VIT_ROWS * VIT_DIM];          // the head outputs O
+const uint32_t vit_out_rows = VIT_ROWS;
+const uint32_t vit_out_cols = VIT_DIM;
 uint64_t       vit_cycles;
 uint64_t       vit_cycles_layernorm;
 uint64_t       vit_cycles_qkv;
 uint64_t       vit_cycles_scores;
 uint64_t       vit_cycles_softmax;
+uint64_t       vit_cycles_pv;
 
 // Floor square root of v, bit by bit.
 static uint32_t isqrt64(uint64_t v) {
@@ -162,6 +166,28 @@ static void softmax(const int8_t* S, int8_t* P, uint32_t rows, uint32_t cols,
     }
 }
 
+// O = sat8(rshift(P_h . V_h, shift)) for every batch and head. P_h is slot
+// b * 6 + h of P (32 x 32); V_h is the rows of batch b, columns
+// 2 * VIT_DIM + h * 64 .. of QKV (32 x 64); the result goes to the same rows,
+// columns h * 64 .. of O.
+static void weighted_values(const int8_t* P, const int8_t* QKV, int8_t* O, uint32_t shift) {
+    for (uint32_t b = 0; b < VIT_NUM_BATCHES; b++) {
+        for (uint32_t h = 0; h < VIT_HEADS; h++) {
+            const int8_t* p = P + (b * VIT_HEADS + h) * VIT_BATCH * VIT_BATCH;
+            const int8_t* v = QKV + b * VIT_BATCH * VIT_QKV + 2 * VIT_DIM + h * VIT_HEAD_DIM;
+            int8_t*       o = O + b * VIT_BATCH * VIT_DIM + h * VIT_HEAD_DIM;
+            for (uint32_t i = 0; i < VIT_BATCH; i++) {
+                for (uint32_t d = 0; d < VIT_HEAD_DIM; d++) {
+                    int32_t acc = 0;
+                    for (uint32_t j = 0; j < VIT_BATCH; j++)
+                        acc += p[i * VIT_BATCH + j] * v[j * VIT_QKV + d];
+                    o[i * VIT_DIM + d] = sat8(rshift(acc, shift));
+                }
+            }
+        }
+    }
+}
+
 int main(void) {
     uint64_t t0 = nn_cycles();
     layernorm(X, XN, VIT_ROWS, VIT_DIM);
@@ -170,13 +196,16 @@ int main(void) {
     uint64_t t2 = nn_cycles();
     attention_scores(QKV, S, VIT_SCORE_SHIFT);
     uint64_t t3 = nn_cycles();
-    softmax(S, vit_out, VIT_S_ROWS, VIT_BATCH, exp_table);
+    softmax(S, P, VIT_S_ROWS, VIT_BATCH, exp_table);
     uint64_t t4 = nn_cycles();
+    weighted_values(P, QKV, vit_out, VIT_PV_SHIFT);
+    uint64_t t5 = nn_cycles();
 
     vit_cycles_layernorm = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
     vit_cycles_scores    = t3 - t2;
     vit_cycles_softmax   = t4 - t3;
-    vit_cycles           = t4 - t0;
+    vit_cycles_pv        = t5 - t4;
+    vit_cycles           = t5 - t0;
     return 0;
 }

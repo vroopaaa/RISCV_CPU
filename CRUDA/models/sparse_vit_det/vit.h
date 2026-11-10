@@ -67,4 +67,10 @@ _Static_assert(VIT_HEAD_DIM == 64, "VIT_SCORE_SHIFT assumes sqrt(head dim) = 8")
 // largest 127/128 (softmax.md).
 #define VIT_P_FRAC   7u
 
+// Weighted sum of values: O_h = P_h . V_h per batch and head, the heads side
+// by side in O (VIT_ROWS x VIT_DIM, head h = columns h * 64 ..). P has f = 7
+// and V f = 5, so the int32 sum has f = 12; shifting by 12 - 5 = 7 leaves O
+// at f = 5.
+#define VIT_PV_SHIFT 7u
+
 #endif // VIT_H
