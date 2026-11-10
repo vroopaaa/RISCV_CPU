@@ -27,9 +27,9 @@ private:
     reg_t aluResult;            // Result from the ALU operation
     reg_t memResult;            // Result from memory read operation
     uint64_t cycle_count;       // Counts completed cycles (one per fetch..writeback pass, plus
-                                 // a LAUNCH's device cycles); separate from the 32 GPRs, not
-                                 // addressable by any instruction. 64-bit: a grid launch can
-                                 // add more cycles than fit in 32 bits.
+                                 // a LAUNCH's device cycles); separate from the 32 GPRs, read
+                                 // by programs only through rdcycle/rdcycleh (OPCODE_SYSTEM).
+                                 // 64-bit: a grid launch can add more cycles than fit in 32 bits.
     bool halted;                // Set by execute() when a jump/branch targets its own address
                                  // (this codebase's halt idiom, e.g. start.s's `_end: j _end`),
                                  // and by run_launch() when a LAUNCH faulted or timed out on the GPU
@@ -110,8 +110,10 @@ private:
     static bool is_branch(uint8_t opcode) { return opcode == 0x63; }
     static bool is_jump(uint8_t opcode) { return opcode == 0x6F || opcode == 0x67; }
     static bool is_branch_or_jump(uint8_t opcode);
-    // Memory-port class for hazard_scan()'s structural-hazard checks 
-    enum MemClass { MEM_NONE, MEM_BANK_A, MEM_BANK_B, MEM_STORE };
+    // Memory-port class for hazard_scan()'s structural-hazard checks.
+    // MEM_BLK / MEM_BKT: the block map's and the bucket heads' single port --
+    // one instruction of each per window.
+    enum MemClass { MEM_NONE, MEM_BANK_A, MEM_BANK_B, MEM_BANK_C, MEM_STORE, MEM_BLK, MEM_BKT };
     static MemClass mem_class(uint8_t opcode, uint8_t funct3);
     // Which of rs1/rs2 a given opcode/funct3 actually reads (decode_one()
     // always populates both bit fields regardless of opcode).
@@ -119,6 +121,43 @@ private:
     // LAUNCH (0x5B), shared by read() and read_m(): runs the grid, adds the
     // device cycles, halts if the GPU faulted or timed out.
     void run_launch(uint8_t funct3, reg_t entry, reg_t dims, reg_t launch_pc);
+    // SYSTEM (0x73), shared by read() and read_m(): is_counter_read() says
+    // whether it is rdcycle/rdcycleh (decode uses it for the rd write);
+    // run_system() returns the counter half, or prints the error for anything
+    // else and returns 0 (not written: reg write is off for those).
+    static bool is_counter_read(const InstructionFields& f);
+    reg_t run_system(const InstructionFields& f, reg_t word, reg_t op_pc);
+    // Custom-0 (0x0B), shared by read() and read_one(): NPU tile transfers
+    // and the output stage (funct3 0-2, 4-6) or the memory print (3).
+    void run_npu_op(uint8_t funct3, reg_t base, reg_t rs2_val);
+
+    // Custom-3 (0x7B) token-selection unit for greedy token selection: the
+    // block map (funct3 0-2, tests/FixationSampling/doc/blk_design.md) and the
+    // bucket heads (funct3 3-7, .../doc/bkt_design.md). Hidden state, reachable
+    // only through these instructions.
+    //
+    // Block map: one bit per cell, 1 = still pickable: row r is blkValid[r],
+    // column c is bit c. Only rows/columns < blkDim are used; blk.clr sets
+    // blkDim (32 or 64) and makes all those cells pickable.
+    static constexpr uint32_t BLK_MAX_DIM = 64;
+    uint64_t blkValid[BLK_MAX_DIM];
+    uint32_t blkDim;
+    // Bucket heads: one entry per 10-bit score value. bktHead[v] = first cell
+    // (12-bit index) of bucket v, meaningful only while bktValid[v] = 1; a
+    // bucket with bktValid[v] = 0 reads as -1 (empty). bkt.clr resets only
+    // the valid bits (flops); bktHead (SRAM in hardware) is never cleared.
+    static constexpr uint32_t BKT_BUCKETS = 1024;
+    uint16_t bktHead[BKT_BUCKETS];
+    bool bktValid[BKT_BUCKETS];
+    // Shared by read() and read_m(): dispatches on funct3 to run_blk() /
+    // run_bkt(). Returns the value for rd (0 for instructions without one).
+    reg_t run_toksel(uint8_t funct3, reg_t rs1_val, reg_t rs2_val, reg_t op_pc);
+    // rs1_val = cell index (blk) or D (blk.clr). Returns 1/0 for blk, 0 for blk.clr.
+    reg_t run_blk(uint8_t funct3, reg_t rs1_val, reg_t op_pc);
+    // bkt.ins: rs1_val = cell index, rs2_val = score; bkt.head: rs1_val = score.
+    reg_t run_bkt(uint8_t funct3, reg_t rs1_val, reg_t rs2_val, reg_t op_pc);
+    // blk, bkt.ins and bkt.head write rd; blk.clr, bkt.clr and reserved funct3 don't.
+    static bool toksel_writes_rd(uint8_t funct3) { return funct3 == 0x0 || funct3 == 0x4 || funct3 == 0x5; }
 public:
     // Constructor
     CPU(Memory* mem_ptr);
@@ -170,10 +209,38 @@ public:
     // Without one, LAUNCH prints an error and does nothing.
     void attach_gpu(GridLauncher* g) { gpu = g; }
     uint64_t get_cycle_count() const { return cycle_count; }
+    // Presets the cycle counter, for harnesses (what M-mode software does by
+    // writing mcycle) -- e.g. to test a program's 64-bit counter read across
+    // the 2^32 wrap without running 4 billion cycles first.
+    void set_cycle_count(uint64_t c) { cycle_count = c; }
     // Custom-2: host-side grid launch -- .insn r 0x5B, 0, 0, x0, rs1, rs2
     // rs1 = kernel entry, rs2 = (num_blocks << 16) | threads_per_block,
     // a0 (x10) = kernel argument (read implicitly). See docs/CUDA/grid_launch_plan.md 4.1.
     static constexpr uint8_t OPCODE_LAUNCH = 0x5B;
+    // SYSTEM: only the two cycle counter reads (Zicntr) are supported --
+    //   rdcycle  rd   csrrs rd, cycle  (0xC00), x0   rd = low 32 bits of cycle_count
+    //   rdcycleh rd   csrrs rd, cycleh (0xC80), x0   rd = high 32 bits
+    // The value is the number of cycles completed before the cycle the read
+    // issues in (on the superscalar host: before its issue group). Any other
+    // SYSTEM instruction (ECALL, EBREAK, CSR writes, other CSRs) prints an
+    // error and is ignored. See CRUDA/docs/design/cycle_counter.md.
+    static constexpr uint8_t OPCODE_SYSTEM = 0x73;
+    // Custom-3: token-selection unit (greedy token selection). Every
+    // instruction takes 1 cycle, like an ALU op.
+    //   blk rd, rs1   .insn r 0x7B, 0, 0, rd, rs1, x0   test-and-claim cell rs1:
+    //                 rd = 1 if it was pickable, and then its 3x3 neighbourhood
+    //                 (clipped at the grid edges) is made unpickable; else rd = 0
+    //                 and nothing changes. Index = D*r + c; upper bits ignored.
+    //   blk.clr rs1   .insn r 0x7B, 1, 0, x0, rs1, x0   grid width D = rs1 (32
+    //                 or 64), every cell pickable again.
+    //   bkt.clr       .insn r 0x7B, 3, 0, x0, x0, x0    every bucket empty.
+    //   bkt.ins rd, rs1, rs2   .insn r 0x7B, 4, 0, rd, rs1, rs2   push cell
+    //                 rs1[11:0] on bucket rs2[9:0]: rd = the old head (-1 if the
+    //                 bucket was empty), then head = rs1.
+    //   bkt.head rd, rs1   .insn r 0x7B, 5, 0, rd, rs1, x0   rd = head of bucket
+    //                 rs1[9:0], -1 if empty.
+    // funct3 2, 6, 7 are reserved.
+    static constexpr uint8_t OPCODE_TOKSEL = 0x7B;
     // The amount of memory to reserve for the host stack.
     static constexpr uint32_t HOST_STACK_RESERVE = 0x10000; // 64 KB (Other devices can place it's stack below it)
 };

@@ -29,6 +29,9 @@ int main(int argc, char* argv[]) {
     // still runs the original single-instruction pipeline.
     std::string mode = "scalar";  // "scalar" (default) or "superscalar"
     int issue_width = 0;          // superscalar only; 0 => CPU's own default (MAX_ISSUE_WIDTH)
+    // Optional 8th arg: the cycle counter's start value (tests/cycle's
+    // test of a 64-bit rdcycleh/rdcycle read across the 2^32 wrap).
+    unsigned long long start_cycle = 0;
 
     if (argc > 1) bin_path = argv[1];
     if (argc > 2) num_cycles = std::atoll(argv[2]);
@@ -37,6 +40,7 @@ int main(int argc, char* argv[]) {
     if (argc > 5) dump_file_path = argv[5];
     if (argc > 6) mode = argv[6];
     if (argc > 7) issue_width = std::atoi(argv[7]);
+    if (argc > 8) start_cycle = std::strtoull(argv[8], nullptr, 0);
     bool superscalar = (mode == "superscalar");
 
     std::cout << "Starting RISC-V CPU Emulator - Compiled C Program Test..." << std::endl;
@@ -62,6 +66,7 @@ int main(int argc, char* argv[]) {
     if (superscalar && issue_width > 0) {
         cpu.set_issue_width(issue_width);
     }
+    cpu.set_cycle_count(start_cycle);
 
     std::cout << "\n--- Initial State ---" << std::endl;
     cpu.print_state();

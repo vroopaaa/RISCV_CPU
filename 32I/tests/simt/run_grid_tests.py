@@ -399,6 +399,7 @@ BAD_INSTRUCTIONS = {
     "launch":      (0x0000005B, "LAUNCH"),       # nested launch from inside a kernel
     "npu":         (0x0000000B, "NPU"),          # custom-0, GPU->NPU handoff not built
     "ecall":       (0x00000073, "SYSTEM"),       # no traps / CSRs anywhere
+    "rdcycle":     (0xC0002573, "SYSTEM"),       # the cycle counter is the host CPU's only
     "wspawn":      (0x0000102B, "SIMT_WSPAWN"),  # needs the phase 4 scheduler
     "bar":         (0x0000302B, "SIMT_BAR"),     # needs the phase 4 scheduler
     "ident_sel4":  (0x0800702B, "SIMT_IDENT"),   # IDENT selector 4 doesn't exist

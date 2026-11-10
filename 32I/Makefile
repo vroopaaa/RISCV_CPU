@@ -136,5 +136,10 @@ run-grid-tests: $(GRID_HARNESS) $(TEST_TARGET)
 
 run-simt-tests: run-simt-regfile-test run-simt-exec-tests run-grid-tests
 
+# Cycle counter (rdcycle/rdcycleh) tests: assembly programs in
+# tests/cycle/programs/ run on build/run_test, scalar and superscalar.
+run-cycle-tests: $(TEST_TARGET)
+	python3 tests/cycle/run_cycle_tests.py
+
 # Phony targets aren't actual files
-.PHONY: all clean test run-test run-simt-regfile-test run-grid-tests run-simt-exec-tests run-simt-tests
+.PHONY: all clean test run-test run-simt-regfile-test run-grid-tests run-simt-exec-tests run-simt-tests run-cycle-tests

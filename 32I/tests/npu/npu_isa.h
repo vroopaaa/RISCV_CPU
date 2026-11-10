@@ -73,4 +73,10 @@ static inline void npu_store_c8(int8_t* dst, uint32_t shift) {
     asm volatile(".insn r 0x0B, 5, 0, zero, %0, %1" : : "r"(dst), "r"(shift) : "memory");
 }
 
+// funct3 6: copy a 256-byte int8 tile from src into B, transposed:
+// B[i][j] = src[j * 16 + i]. Used for A x B^T (CRUDA/docs/design/gemm_bt.md).
+static inline void npu_load_b_t(const int8_t* src) {
+    asm volatile(".insn r 0x0B, 6, 0, zero, %0, zero" : : "r"(src) : "memory");
+}
+
 #endif // NPU_ISA_H

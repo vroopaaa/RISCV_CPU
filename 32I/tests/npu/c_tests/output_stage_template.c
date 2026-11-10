@@ -14,6 +14,10 @@
 //   3: MACs accumulate on top of the bias: load_bias, MAC, MAC, store_c8
 //   4: load_bias alone, then store_c (int32, 64-byte rows): C == bias in
 //      every row
+//   5: B loaded transposed: load_bias, load_a, load_b_t, MAC, store_c8
+//      (the product uses b transposed)
+//   6: load_b_t then load_b of the same tile: the plain load must fully
+//      replace the transposed one (the product uses b as stored)
 #include <stdint.h>
 #include "npu_isa.h"
 
@@ -56,6 +60,14 @@ int main(void) {
         } else if (t->mode == 4) {
             npu_load_bias(t->bias);
             npu_store_c((int32_t*)o, NPU_TILE_DIM * 4);
+        } else if (t->mode == 5 || t->mode == 6) {
+            npu_load_bias(t->bias);
+            npu_load_a(t->a);
+            npu_load_b_t(t->b);
+            if (t->mode == 6)
+                npu_load_b(t->b);
+            npu_write32(NPU_MAC, 1);
+            npu_store_c8(o, t->shift);
         } else {
             npu_load_bias(t->bias);
             mac_tile(t);

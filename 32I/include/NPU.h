@@ -26,6 +26,8 @@ public:
     static constexpr uint32_t STATUS_ADDR     = NPU_BASE + 0x18;
     // Read-triggered: any read here dumps A/B/C to stdout; the returned value is unused
     static constexpr uint32_t PRINT_ADDR      = NPU_BASE + 0x1C;
+    // Output-stage shift (low 5 bits kept). Like M/K/N, not cleared by RESET.
+    static constexpr uint32_t OUT_SHIFT_ADDR  = NPU_BASE + 0x20;
 
 
     // A, B, and result all live inside ONE contiguous data window.
@@ -37,7 +39,18 @@ public:
     static constexpr uint32_t MAT_A_ADDR      = NPU_BASE + 0x100;
     static constexpr uint32_t MAT_B_ADDR      = MAT_A_ADDR + TILE_ELEMS;      // int8
     static constexpr uint32_t RESULT_ADDR     = MAT_B_ADDR + TILE_ELEMS;      // int32 from here
-    static constexpr uint32_t DATA_WINDOW_END = RESULT_ADDR + TILE_ELEMS * 4;
+    // Bias preload, after the int32 result: a write-only broadcast port into
+    // C, no storage of its own. Writing word j sets C(i, j) = value for every
+    // row i, so a tile starts from its bias instead of zero and the MACs add
+    // on top. RESET still clears C (no bias).
+    // Then the int8 output stage, read-only and computed on read from C, M,
+    // N and the shift:
+    //   out(i, j) = sat8(rshift(C(i, j), shift))  if i < M and j < N
+    //             = 0                              otherwise
+    // rshift rounds halves toward +inf. Packed 4 per word like A/B.
+    static constexpr uint32_t BIAS_ADDR       = RESULT_ADDR + TILE_ELEMS * 4; // int32 x MAX_DIM, write-only
+    static constexpr uint32_t OUT8_ADDR       = BIAS_ADDR + MAX_DIM * 4;      // int8 x TILE_ELEMS
+    static constexpr uint32_t DATA_WINDOW_END = OUT8_ADDR + TILE_ELEMS;
     static constexpr uint32_t NPU_WINDOW_SIZE = DATA_WINDOW_END - NPU_BASE;
 
 private:
@@ -45,6 +58,7 @@ private:
     // int32 accumulator/result C.
     int8_t  ab[2 * TILE_ELEMS];   // A occupies [0, TILE_ELEMS), B occupies [TILE_ELEMS, 2*TILE_ELEMS)
     int32_t c[TILE_ELEMS];
+    uint32_t out_shift;           // output stage: 0..31
 
     static constexpr uint32_t A_OFFSET = 0;
     static constexpr uint32_t B_OFFSET = TILE_ELEMS;
@@ -54,5 +68,6 @@ private:
     void compute();
     void mac();
     void reset();
+    int8_t out8(uint32_t elem) const; // output stage, element elem = i * MAX_DIM + j
 };
 #endif

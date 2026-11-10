@@ -181,12 +181,25 @@ static void write_gpu_section(std::ostream& out, const GridLauncher& gpu, GpuTra
 }
 
 static const char* npu_tag(uint8_t opcode, uint8_t funct3) {
+    if (opcode == CPU::OPCODE_TOKSEL) {
+        switch (funct3) {
+            case 0: return "   <-- BLK (test-and-claim 3x3)";
+            case 1: return "   <-- BLK.CLR";
+            case 3: return "   <-- BKT.CLR";
+            case 4: return "   <-- BKT.INS (push cell on bucket)";
+            case 5: return "   <-- BKT.HEAD";
+            default: return "   <-- TOKSEL (?)";
+        }
+    }
     if (opcode != 0x0B) return "";
     switch (funct3) {
         case 0: return "   <-- NPU LOAD A (contiguous 256-word)";
         case 1: return "   <-- NPU LOAD B (contiguous 256-word)";
         case 2: return "   <-- NPU STORE C (contiguous 256-word)";
         case 3: return "   <-- NPU PRINT (debug)";
+        case 4: return "   <-- NPU LOAD BIAS (C = bias, 16 int32)";
+        case 5: return "   <-- NPU STORE C8 (output stage, int8 tile)";
+        case 6: return "   <-- NPU LOAD B TRANSPOSED (B[i][j] = src[j][i])";
         default: return "   <-- NPU (?)";
     }
 }
@@ -208,7 +221,7 @@ int main(int argc, char* argv[]) {
     auto dis_map = load_disassembly(dis_path);
     auto symbols = load_symbols(dis_path);
 
-    Memory memory(4 * 1024 * 1024);
+    Memory memory(64 * 1024 * 1024); // tests/python/link.ld's RAM
     if (!load_binary(memory, bin_path, 0x0)) return 1;
     CPU cpu(&memory);
     // Same GPU as tests/basic/main.cpp (emul), with tracing hooked in.

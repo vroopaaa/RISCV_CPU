@@ -329,7 +329,10 @@ def output_stage_expected(case):
                 w = case["bias"][j] & 0xFFFFFFFF
                 exp += [((w >> (8 * k)) & 0xFF) for k in range(4)]
         return [v - 256 if v >= 128 else v for v in exp]
-    if mode == 2:
+    if mode == 5:  # B loaded transposed: the product uses b^T
+        bt = [case["b"][j * TILE + i] for i in range(TILE) for j in range(TILE)]
+        exp = output_stage_model(dict(case, b=bt))
+    elif mode == 2:
         exp = output_stage_model(case) + output_stage_model(case, use_bias=False)
     elif mode == 3:
         exp = output_stage_model(case, macs=2)
@@ -374,6 +377,12 @@ def output_stage_cases(rng):
     cases.append(case(tile(), tile(), bias(1000, 100000), mode=2, what="RESET clears the bias"))
     cases.append(case(tile(), tile(), bias(-100000, 100000), shift=10, mode=3, what="MACs accumulate onto the bias"))
     cases.append(case(tile(), tile(), bias(-2**31 + 1, 2**31 - 1), mode=4, what="load_bias broadcasts into C"))
+    # load_b_t (funct3 6): random tiles are not symmetric, so a missing
+    # transpose shows.
+    cases.append(case(tile(), tile(), bias(-5000, 5000), mode=5, what="load_b_t"))
+    cases.append(case(tile(), tile(), bias(-5000, 5000), shift=7, mode=5, what="load_b_t, shift 7"))
+    cases.append(case(tile(), tile(), bias(1000, 100000), m=5, n=11, mode=5, what="load_b_t, edge mask 5x11"))
+    cases.append(case(tile(), tile(), bias(-5000, 5000), mode=6, what="load_b after load_b_t replaces B"))
     return cases
 
 
