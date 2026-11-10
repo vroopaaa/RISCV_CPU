@@ -2,8 +2,11 @@
 // vit_baseline.c computes the same thing on the host CPU alone; run_vit.py
 // runs both and compares their outputs and cycles.
 //
-// Step 1: LayerNorm of VIT_NUM_BATCHES batches (VIT_ROWS x VIT_DIM, stacked)
-// with no learned weights, in one call: each 32-row block of rows goes to an SM.
+// The model so far, on VIT_ROWS x VIT_DIM activations (VIT_NUM_BATCHES
+// batches stacked):
+//   1. XN  = LayerNorm(X), no learned weights    GPU: one thread per row,
+//                                                32-row blocks spread over the SMs
+//   2. QKV = XN . Wqkv, no bias                   NPU: 16 x 16 tiles
 //
 // Every tensor is in CRUDA's padded 16 x 16 tile layout (nn.h). Compiled
 // -O2; the GPU lego files -O0.
@@ -14,26 +17,36 @@
 _Static_assert(VIT_ROWS % NN_TILE == 0 && VIT_DIM % NN_TILE == 0,
                "sizes are whole tiles, so the tensors have no padding");
 
-#define VIT_LDT (VIT_DIM / NN_TILE)    // tiles per tile-row of a VIT_DIM-wide tensor
+// Tiles per tile-row: ldt of a VIT_DIM-wide and of a VIT_QKV-wide tensor.
+#define VIT_LDT     (VIT_DIM / NN_TILE)
+#define VIT_LDT_QKV (VIT_QKV / NN_TILE)
 
-// The input, already in tile order (make_input.py).
-#define VIT_INPUT_TILED
+// The input and the weights, already in tile order (make_input.py).
 static const int8_t X[] __attribute__((aligned(NN_TILE_BYTES))) = {
-#include VIT_INPUT_FILE
+#include VIT_X_TILE_MAJOR
 };
-_Static_assert(sizeof X == VIT_ROWS * VIT_DIM, "the input file doesn't match vit.h's sizes");
+_Static_assert(sizeof X == VIT_ROWS * VIT_DIM, "the X file doesn't match vit.h's sizes");
+
+static const int8_t Wqkv[] __attribute__((aligned(NN_TILE_BYTES))) = {
+#include "input/tile_major/Wqkv_384_1152.txt"
+};
+_Static_assert(sizeof Wqkv == VIT_DIM * VIT_QKV, "the Wqkv file doesn't match vit.h's sizes");
 
 // nn_layernorm takes per-column gamma and beta; no weights means gamma = 1.0
 // and beta = 0 in every column.
 static int8_t  ln_gamma[VIT_DIM];
 static int32_t ln_beta[VIT_DIM];
 
+static int8_t XN[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // LayerNorm output
+
 // Read by run_vit.py after the run: the output (tile layout), its size, and
-// the cycles spent in the model.
-int8_t         vit_out[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));
+// the cycles of the whole model and of each step.
+int8_t         vit_out[VIT_ROWS * VIT_QKV] __attribute__((aligned(NN_TILE_BYTES)));
 const uint32_t vit_out_rows = VIT_ROWS;
-const uint32_t vit_out_cols = VIT_DIM;
+const uint32_t vit_out_cols = VIT_QKV;
 uint64_t       vit_cycles;
+uint64_t       vit_cycles_layernorm;
+uint64_t       vit_cycles_qkv;
 
 int main(void) {
     for (uint32_t c = 0; c < VIT_DIM; c++) {
@@ -42,9 +55,14 @@ int main(void) {
     }
 
     uint64_t t0 = nn_cycles();
-    int r = nn_layernorm(X, VIT_LDT, vit_out, VIT_LDT, VIT_ROWS, VIT_DIM, ln_gamma, ln_beta, 0);
+    int r = nn_layernorm(X, VIT_LDT, XN, VIT_LDT, VIT_ROWS, VIT_DIM, ln_gamma, ln_beta, 0);
     uint64_t t1 = nn_cycles();
+    r |= nn_gemm(XN, VIT_LDT, Wqkv, VIT_LDT_QKV, 0,
+                 vit_out, VIT_LDT_QKV, VIT_ROWS, VIT_DIM, VIT_QKV, VIT_QKV_SHIFT);
+    uint64_t t2 = nn_cycles();
 
-    vit_cycles = t1 - t0;
+    vit_cycles_layernorm = t1 - t0;
+    vit_cycles_qkv       = t2 - t1;
+    vit_cycles           = t2 - t0;
     return r;
 }

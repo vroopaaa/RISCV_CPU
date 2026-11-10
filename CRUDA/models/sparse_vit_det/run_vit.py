@@ -14,7 +14,10 @@ program left in these globals:
                            vit_baseline.c
   uint32_t vit_out_rows    its size
   uint32_t vit_out_cols
-  uint64_t vit_cycles      cycles the program measured around the model
+  uint64_t vit_cycles      cycles the program measured around the whole model
+  uint64_t vit_cycles_<step>   ... and around each step (optional; both
+                           programs must have the same steps, listed in the
+                           order they appear in vit.c)
 
 It checks that each run halted, returned 0 and printed nothing to stderr,
 that both programs produced the same output in every mode, and prints the
@@ -25,7 +28,9 @@ Exit code 0 if the outputs match everywhere, 1 otherwise.
 """
 
 import os
+import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -36,7 +41,7 @@ import run_nn_tests as nt  # noqa: E402
 
 ref = nt.ref
 MODES = [("scalar", 0), ("superscalar", 2), ("superscalar", 4), ("superscalar", 10)]
-BUDGET = 50_000_000
+BUDGET = 4_000_000_000     # cycles; the baseline's 8-batch GEMM is ~800M
 OPT = "O2"                    # host code; GPU kernel files are always -O0
 
 
@@ -83,24 +88,41 @@ def read_u32(binf, addr):
         return int.from_bytes(f.read(4), "little")
 
 
-def run_program(name, source, kernels, tiled):
+def step_names(source):
+    """The vit_cycles_<step> globals, in the order they first appear in source."""
+    with open(source) as f:
+        names = re.findall(r"\bvit_cycles_(\w+)", f.read())
+    return list(dict.fromkeys(names))
+
+
+def run_program(name, source, kernels, tiled, steps):
     out, binf, syms = build(name, source, kernels)
+    for st in steps:
+        if f"vit_cycles_{st}" not in syms:
+            raise SystemExit(f"{os.path.basename(source)} does not define the global vit_cycles_{st}")
+    counters = ["vit_cycles"] + [f"vit_cycles_{st}" for st in steps]
     rows = read_u32(binf, syms["vit_out_rows"][0])
     cols = read_u32(binf, syms["vit_out_cols"][0])
     want = (ref.pad16(rows) * ref.pad16(cols)) if tiled else rows * cols
     if syms["vit_out"][1] < want:
         raise SystemExit(f"{name}: vit_out is {syms['vit_out'][1]} bytes, "
                          f"{rows} x {cols} needs {want}")
-    # One dump covering both vit_out and vit_cycles.
-    lo = min(syms["vit_out"][0], syms["vit_cycles"][0])
-    hi = max(syms["vit_out"][0] + want, syms["vit_cycles"][0] + 8)
+    # One dump covering vit_out and every cycle counter.
+    lo = min([syms["vit_out"][0]] + [syms[k][0] for k in counters])
+    hi = max([syms["vit_out"][0] + want] + [syms[k][0] + 8 for k in counters])
+
+    def one_mode(mode, width):
+        tag = "scalar" if mode == "scalar" else f"w{width}"
+        return tag, nt.simulate(binf, BUDGET, lo, hi - lo,
+                                os.path.join(out, f"dump_{tag}.txt"), mode, width)
+
+    with ThreadPoolExecutor(len(MODES)) as pool:       # the modes run in parallel
+        results = list(pool.map(lambda m: one_mode(*m), MODES))
 
     runs = {}
-    for mode, width in MODES:
-        tag = "scalar" if mode == "scalar" else f"w{width}"
-        a0, total, dump, stderr = nt.simulate(binf, BUDGET, lo, hi - lo,
-                                              os.path.join(out, f"dump_{tag}.txt"), mode, width)
-        c = syms["vit_cycles"][0] - lo
+    for tag, (a0, total, dump, stderr) in results:
+        cyc = {k: int.from_bytes(dump[syms[k][0] - lo:syms[k][0] - lo + 8], "little")
+               for k in counters}
         o = syms["vit_out"][0] - lo
         y = dump[o:o + want]
         if tiled:
@@ -115,15 +137,20 @@ def run_program(name, source, kernels, tiled):
         if stderr.strip():
             problems.append("stderr: " + stderr.strip().splitlines()[0])
         runs[tag] = dict(out=np.asarray(y, dtype=np.int64),
-                         model=int.from_bytes(dump[c:c + 8], "little"),
-                         total=total, problems=problems)
+                         steps=[cyc[f"vit_cycles_{st}"] for st in steps],
+                         model=cyc["vit_cycles"], total=total, problems=problems)
     return runs
 
 
 def main():
     nt.run(["make", "build/run_test"], cwd=os.path.join(nt.RSVP, "32I"))
-    cruda = run_program("cruda", os.path.join(HERE, "vit.c"), kernel_files(), tiled=True)
-    base = run_program("baseline", os.path.join(HERE, "vit_baseline.c"), [], tiled=False)
+    steps = step_names(os.path.join(HERE, "vit.c"))
+    with ThreadPoolExecutor(2) as pool:                 # both programs at once
+        fc = pool.submit(run_program, "cruda", os.path.join(HERE, "vit.c"),
+                         kernel_files(), True, steps)
+        fb = pool.submit(run_program, "baseline", os.path.join(HERE, "vit_baseline.c"),
+                         [], False, steps)
+        cruda, base = fc.result(), fb.result()
 
     ok = True
     for tag in cruda:
@@ -143,14 +170,16 @@ def main():
                   f"({r}, {c}): vit.c {a[r, c]}, vit_baseline.c {b[r, c]}")
 
     shape = cruda["scalar"]["out"].shape
-    print(f"output {shape[0]} x {shape[1]}\n")
-    print(f"{'mode':<8} {'baseline model':>14} {'CRUDA model':>12} {'speedup':>8}"
-          f"   {'baseline prog':>13} {'CRUDA prog':>11}")
+    print(f"output {shape[0]} x {shape[1]}; cycles:\n")
+    print(f"{'mode':<7} {'step':<12} {'baseline':>13} {'CRUDA':>11} {'speedup':>8}")
     for tag in cruda:
-        bm, cm = base[tag]["model"], cruda[tag]["model"]
-        print(f"{tag:<8} {bm:>14,} {cm:>12,} {bm / max(cm, 1):>7.1f}x"
-              f"   {base[tag]['total']:>13,} {cruda[tag]['total']:>11,}")
-    print("\nOUTPUTS MATCH" if ok else "\nFAILED")
+        b, c = base[tag], cruda[tag]
+        lines = list(zip(steps, b["steps"], c["steps"]))
+        lines += [("model", b["model"], c["model"]), ("program", b["total"], c["total"])]
+        for i, (st, bc, cc) in enumerate(lines):
+            print(f"{tag if i == 0 else '':<7} {st:<12} {bc:>13,} {cc:>11,} {bc / max(cc, 1):>7.1f}x")
+        print()
+    print("OUTPUTS MATCH" if ok else "FAILED")
     sys.exit(0 if ok else 1)
 
 
