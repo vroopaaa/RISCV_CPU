@@ -14,6 +14,7 @@ Files (<rows>_<cols> is the matrix size):
   Wqkv_384_1152.txt   QKV projection weight, K x N = in x out (Q | K | V
                       column blocks of 384)
   Wo_384_384.txt      attention output projection weight, in x out
+  W1_384_1536.txt     MLP first layer (FC1) weight, in x out
 
   input/exp_table_256.txt   softmax's exp table, 256 uint16 values (a vector
                       has no row/tile order, so it is written once):
@@ -39,6 +40,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "ref"))
 import nn_ref as ref  # noqa: E402
 
 BATCH, DIM, QKV = 32, 384, 3 * 384     # must match vit.h (the programs check the counts)
+HIDDEN = 4 * DIM                       # MLP width, 1536
 BATCH_COUNTS = [1, 2, 4, 6, 8]
 
 
@@ -68,7 +70,8 @@ def main():
     rng = np.random.default_rng(args.seed)
     X = randn8(rng, (max(BATCH_COUNTS) * BATCH, DIM))
     Wqkv = randn8(rng, (DIM, QKV))
-    Wo = randn8(rng, (DIM, DIM))          # drawn after Wqkv: the earlier files don't change
+    Wo = randn8(rng, (DIM, DIM))          # each weight is drawn after the earlier ones,
+    W1 = randn8(rng, (DIM, HIDDEN))       # so adding one doesn't change the others
 
     for n in BATCH_COUNTS:
         rows = n * BATCH
@@ -76,6 +79,7 @@ def main():
               f"input X, {n} batch{'es' if n > 1 else ''} of {BATCH} rows", args.seed)
     write(f"Wqkv_{DIM}_{QKV}", Wqkv, "QKV projection weight Wqkv, in x out", args.seed)
     write(f"Wo_{DIM}_{DIM}", Wo, "attention output projection weight Wo, in x out", args.seed)
+    write(f"W1_{DIM}_{HIDDEN}", W1, "MLP first layer weight W1, in x out", args.seed)
 
     table = ref.exp_table(1 / 16).tolist()
     with open(os.path.join(HERE, "input", "exp_table_256.txt"), "w") as f:

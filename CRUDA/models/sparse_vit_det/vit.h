@@ -11,6 +11,7 @@
 #define VIT_ROWS        (VIT_NUM_BATCHES * VIT_BATCH)
 #define VIT_DIM         384u    // embedding width
 #define VIT_QKV         (3u * VIT_DIM)   // Q | K | V side by side
+#define VIT_HIDDEN      (4u * VIT_DIM)   // MLP width, 1536
 
 // Attention: VIT_HEADS heads of VIT_HEAD_DIM columns each. Q is columns
 // 0 .. 383 of QKV, K 384 .. 767, V 768 .. 1151; head h is columns
@@ -85,5 +86,9 @@ _Static_assert(VIT_HEAD_DIM == 64, "VIT_SCORE_SHIFT assumes sqrt(head dim) = 8")
 
 // LN2 = LayerNorm(X1), no learned weights: same as the first LayerNorm (the
 // input's scale doesn't matter), output at f = VIT_LN_FRAC.
+
+// MLP first layer: H = XN2 . W1, no bias. W1 has f = 9, so the int32 sum has
+// f = 5 + 9 = 14; shifting by 9 leaves H at f = 5.
+#define VIT_FC1_SHIFT 9u
 
 #endif // VIT_H

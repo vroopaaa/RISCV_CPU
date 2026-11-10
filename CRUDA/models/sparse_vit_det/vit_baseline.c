@@ -14,6 +14,7 @@
 //   6. A   = O . Wo, no bias                              VIT_ROWS x VIT_DIM
 //   7. X1  = X + A (first residual)                       VIT_ROWS x VIT_DIM
 //   8. XN2 = LayerNorm(X1), no learned weights            VIT_ROWS x VIT_DIM
+//   9. H   = XN2 . W1, no bias (MLP first layer)          VIT_ROWS x VIT_HIDDEN
 //
 // Tensors are plain row-major int8 arrays. Compiled -O2.
 #include <stdint.h>
@@ -36,6 +37,11 @@ static const int8_t Wo[] = {
 };
 _Static_assert(sizeof Wo == VIT_DIM * VIT_DIM, "the Wo file doesn't match vit.h's sizes");
 
+static const int8_t W1[] = {
+#include "input/row_major/W1_384_1536.txt"
+};
+_Static_assert(sizeof W1 == VIT_DIM * VIT_HIDDEN, "the W1 file doesn't match vit.h's sizes");
+
 static int8_t XN[VIT_ROWS * VIT_DIM];    // LayerNorm output
 static const uint16_t exp_table[] = {
 #include "input/exp_table_256.txt"
@@ -48,12 +54,13 @@ static int8_t P[VIT_S_ROWS * VIT_BATCH]; // probabilities
 static int8_t O[VIT_ROWS * VIT_DIM];     // head outputs, side by side
 static int8_t A[VIT_ROWS * VIT_DIM];     // output projection
 static int8_t X1[VIT_ROWS * VIT_DIM];    // first residual
+static int8_t XN2[VIT_ROWS * VIT_DIM];   // LN2's output
 
 // Read by run_vit.py after the run: the output (row-major), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_ROWS * VIT_DIM];          // LN2's output
+int8_t         vit_out[VIT_ROWS * VIT_HIDDEN];       // FC1's output H
 const uint32_t vit_out_rows = VIT_ROWS;
-const uint32_t vit_out_cols = VIT_DIM;
+const uint32_t vit_out_cols = VIT_HIDDEN;
 uint64_t       vit_cycles;
 uint64_t       vit_cycles_layernorm1;
 uint64_t       vit_cycles_qkv;
@@ -63,6 +70,7 @@ uint64_t       vit_cycles_pv;
 uint64_t       vit_cycles_proj;
 uint64_t       vit_cycles_residual1;
 uint64_t       vit_cycles_layernorm2;
+uint64_t       vit_cycles_fc1;
 
 // Floor square root of v, bit by bit.
 static uint32_t isqrt64(uint64_t v) {
@@ -224,8 +232,10 @@ int main(void) {
     uint64_t t6 = nn_cycles();
     add(X, A, X1, VIT_ROWS * VIT_DIM, VIT_RES_SHIFT);
     uint64_t t7 = nn_cycles();
-    layernorm(X1, vit_out, VIT_ROWS, VIT_DIM);
+    layernorm(X1, XN2, VIT_ROWS, VIT_DIM);
     uint64_t t8 = nn_cycles();
+    matmul(XN2, W1, vit_out, VIT_ROWS, VIT_DIM, VIT_HIDDEN, VIT_FC1_SHIFT);
+    uint64_t t9 = nn_cycles();
 
     vit_cycles_layernorm1 = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
@@ -235,6 +245,7 @@ int main(void) {
     vit_cycles_proj      = t6 - t5;
     vit_cycles_residual1 = t7 - t6;
     vit_cycles_layernorm2 = t8 - t7;
-    vit_cycles           = t8 - t0;
+    vit_cycles_fc1       = t9 - t8;
+    vit_cycles           = t9 - t0;
     return 0;
 }

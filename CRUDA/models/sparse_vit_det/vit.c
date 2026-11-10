@@ -16,6 +16,7 @@
 //   6. A   = O . Wo, no bias                      NPU: nn_gemm
 //   7. X1  = X + A (first residual)               GPU: nn_add, one thread per element
 //   8. XN2 = LayerNorm(X1), no learned weights    GPU: as step 1
+//   9. H   = XN2 . W1, no bias (MLP first layer)  NPU: nn_gemm
 //
 // Every tensor is in CRUDA's padded 16 x 16 tile layout (nn.h). Compiled
 // -O2; the GPU lego files -O0.
@@ -31,6 +32,7 @@ _Static_assert(VIT_ROWS % NN_TILE == 0 && VIT_DIM % NN_TILE == 0,
 #define VIT_LDT     (VIT_DIM / NN_TILE)
 #define VIT_LDT_QKV (VIT_QKV / NN_TILE)
 #define VIT_LDT_S   (VIT_BATCH / NN_TILE)
+#define VIT_LDT_HID (VIT_HIDDEN / NN_TILE)
 
 // A view of a tiled tensor: its tile (tr, tc), where the tensor has ldt
 // tiles per tile-row. A sub-matrix starting on a tile boundary is just this
@@ -53,6 +55,11 @@ static const int8_t Wo[] __attribute__((aligned(NN_TILE_BYTES))) = {
 };
 _Static_assert(sizeof Wo == VIT_DIM * VIT_DIM, "the Wo file doesn't match vit.h's sizes");
 
+static const int8_t W1[] __attribute__((aligned(NN_TILE_BYTES))) = {
+#include "input/tile_major/W1_384_1536.txt"
+};
+_Static_assert(sizeof W1 == VIT_DIM * VIT_HIDDEN, "the W1 file doesn't match vit.h's sizes");
+
 // nn_layernorm takes per-column gamma and beta; no weights means gamma = 1.0
 // and beta = 0 in every column.
 static int8_t  ln_gamma[VIT_DIM];
@@ -65,6 +72,7 @@ static int8_t P[VIT_S_ROWS * VIT_BATCH] __attribute__((aligned(NN_TILE_BYTES)));
 static int8_t O[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));     // head outputs
 static int8_t A[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));     // output projection
 static int8_t X1[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));    // first residual
+static int8_t XN2[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // LN2's output
 
 static const uint16_t exp_table[] = {
 #include "input/exp_table_256.txt"
@@ -73,9 +81,9 @@ _Static_assert(sizeof exp_table == 256 * sizeof(uint16_t), "the exp table must h
 
 // Read by run_vit.py after the run: the output (tile layout), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // LN2's output
+int8_t         vit_out[VIT_ROWS * VIT_HIDDEN] __attribute__((aligned(NN_TILE_BYTES)));   // FC1's output H
 const uint32_t vit_out_rows = VIT_ROWS;
-const uint32_t vit_out_cols = VIT_DIM;
+const uint32_t vit_out_cols = VIT_HIDDEN;
 uint64_t       vit_cycles;
 uint64_t       vit_cycles_layernorm1;
 uint64_t       vit_cycles_qkv;
@@ -85,6 +93,7 @@ uint64_t       vit_cycles_pv;
 uint64_t       vit_cycles_proj;
 uint64_t       vit_cycles_residual1;
 uint64_t       vit_cycles_layernorm2;
+uint64_t       vit_cycles_fc1;
 
 // Step 3. For batch b and head h, in tiles (tile = 16 x 16):
 //   Q_h  = QKV rows of batch b, columns h * 64 ..       2 x 4 tiles at tile (2b, 4h)
@@ -156,8 +165,11 @@ int main(void) {
     uint64_t t6 = nn_cycles();
     r |= nn_add(X, VIT_LDT, 0, A, VIT_LDT, 0, X1, VIT_LDT, VIT_ROWS, VIT_DIM, VIT_RES_SHIFT);
     uint64_t t7 = nn_cycles();
-    r |= nn_layernorm(X1, VIT_LDT, vit_out, VIT_LDT, VIT_ROWS, VIT_DIM, ln_gamma, ln_beta, 0);
+    r |= nn_layernorm(X1, VIT_LDT, XN2, VIT_LDT, VIT_ROWS, VIT_DIM, ln_gamma, ln_beta, 0);
     uint64_t t8 = nn_cycles();
+    r |= nn_gemm(XN2, VIT_LDT, W1, VIT_LDT_HID, 0,
+                 vit_out, VIT_LDT_HID, VIT_ROWS, VIT_DIM, VIT_HIDDEN, VIT_FC1_SHIFT);
+    uint64_t t9 = nn_cycles();
 
     vit_cycles_layernorm1 = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
@@ -167,6 +179,7 @@ int main(void) {
     vit_cycles_proj      = t6 - t5;
     vit_cycles_residual1 = t7 - t6;
     vit_cycles_layernorm2 = t8 - t7;
-    vit_cycles           = t8 - t0;
+    vit_cycles_fc1       = t9 - t8;
+    vit_cycles           = t9 - t0;
     return r;
 }
