@@ -60,6 +60,7 @@ Same encoding as the existing ones: `.insn r 0x0B, funct3, 0, x0, rs1, rs2`.
 | 3 | memory print | src | N | *(existing)* debug |
 | **4** | **`load_bias`** | src | — | read 16 contiguous int32 (64 bytes); set `C(i, j) = bias[j]` for all 16 rows. Replaces `RESET` at the start of a tile. |
 | **5** | **`store_c8`** | dst | shift | run the output stage on `C` and write the 256-byte int8 tile contiguously at `dst` |
+| 6 | `load_b_t` | src | — | *(added later, see [gemm_bt.md](gemm_bt.md))* load a tile into `B` transposed, `B[i][j] = src[j·16 + i]` |
 
 - `store_c8` uses the low 5 bits of `rs2` as `shift` (0 – 31).
 - `store_c8` writes all 256 bytes, padding included, so the destination tile is always

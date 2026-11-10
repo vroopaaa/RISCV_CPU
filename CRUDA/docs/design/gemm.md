@@ -151,7 +151,8 @@ Every default case also runs on the superscalar host at issue widths 1, 2, 4 and
   three address/counter updates and the branch. At width 10 one K step issues per cycle.
   Example: 256 × 512 × 512 (16 · 32 · 32 = 16,384 K steps, 512 output tiles) runs in
   122,957 cycles scalar and 18,631 at width 10. These are whole-program cycles (start-up
-  included, a few dozen) until `rdcycle` exists.
+  included, a few dozen); timing the call alone with `nn_cycles()` is possible now
+  ([cycle_counter.md](cycle_counter.md)).
 - Tile transfers cost one instruction each. A bus model would add the cost of moving
   256 bytes per `load_a` / `load_b` / `store_c8`; that is a separate, later decision
   (see [npu_output_stage.md](npu_output_stage.md) §2).
@@ -169,8 +170,9 @@ Every default case also runs on the superscalar host at issue widths 1, 2, 4 and
 
 - **Transposed operands.** `W` must be stored `K × N`. Multiplying by the transpose of a
   matrix that was produced at run time (e.g. `A · Bᵀ` where `B` is another lego's
-  output) needs either a transpose lego on the GPU or a transposed-load NPU instruction.
-  To be decided when the first lego that needs it is designed.
+  output) is `nn_gemm_bt`, built on a transposed-load NPU instruction: see
+  [gemm_bt.md](gemm_bt.md). `nn_gemm` and `nn_gemm_bt` share one host function in
+  `gemm.c`; `nn_gemm`'s compiled code and cycle counts are unchanged by it.
 - **No operand reuse.** Every `MAC` reloads both tiles: `X`'s tile row is reloaded for
   every output column, and `W`'s tile column for every output row. Operand buffers
   (keeping a tile across several `MAC`s) would be an NPU hardware change.

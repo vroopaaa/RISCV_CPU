@@ -8,9 +8,12 @@ For every test case of a lego this script:
      build/<case>/data.bin; data.h gets each tensor's offset plus the call's
      parameters, data.s pulls data.bin in with .incbin;
   2. builds 32I's start.s + tests/t_<lego>.c + the lego's kernel file +
-     data.s (-O2 by default) against SparseViT/link.ld;
+     data.s against CRUDA's link.ld -- every source at its own -O level
+     (host code -O2 by default, GPU lego files -O0), plus any per-case -D
+     flags;
   3. runs it on 32I/build/run_test -- scalar, and superscalar at issue widths
-     1/2/4/10 -- dumping the output buffer and its guard region;
+     1/2/4/10 (large GPU cases: scalar only) -- dumping the output buffer
+     and its guard region;
   4. checks a0 (the wrapper's return value), the real output elements
      bit-exact against ref/nn_ref.py, zero padding, untouched poison outside
      the output view and in the guard region, and an empty stderr.
@@ -41,6 +44,7 @@ RSVP = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 RUN_TEST = os.path.join(RSVP, "32I", "build", "run_test")
 START_S = os.path.join(RSVP, "32I", "tests", "python", "start.s")
 NPU_INC = os.path.join(RSVP, "32I", "tests", "npu")
+SIMT_INC = os.path.join(RSVP, "32I", "tests", "simt")
 INCLUDE = os.path.join(SCRIPT_DIR, "include")
 KERNELS = os.path.join(SCRIPT_DIR, "kernels")
 TESTS = os.path.join(SCRIPT_DIR, "tests")
@@ -124,12 +128,21 @@ def grid_bytes(grid):
 # Build and run
 # ---------------------------------------------------------------------
 
-def build(case_dir, test_c, kernel_files, opt):
+def build(case_dir, test_c, kernels, opt, cflags):
+    """kernels: list of (path, opt or None); None means the host level `opt`.
+    Each source becomes its own object at its own -O level, then all are linked."""
     elf = os.path.join(case_dir, "prog.elf")
     binf = os.path.join(case_dir, "prog.bin")
-    run([CC, *CFLAGS, f"-{opt}", "-I", INCLUDE, "-I", NPU_INC, "-I", case_dir,
-         "-T", LINK_LD, "-o", elf, START_S, test_c, *kernel_files,
-         os.path.join(case_dir, "data.s")])
+    sources = [(START_S, opt), (test_c, opt)]
+    sources += [(path, kopt or opt) for path, kopt in kernels]
+    sources += [(os.path.join(case_dir, "data.s"), opt)]
+    objs = []
+    for i, (src, o) in enumerate(sources):
+        obj = os.path.join(case_dir, f"{i}_{os.path.splitext(os.path.basename(src))[0]}.o")
+        run([CC, *CFLAGS, f"-{o}", "-I", INCLUDE, "-I", NPU_INC, "-I", SIMT_INC,
+             "-I", case_dir, *cflags, "-c", src, "-o", obj])
+        objs.append(obj)
+    run([CC, *CFLAGS, "-T", LINK_LD, "-o", elf, *objs])
     run([OBJCOPY, "-O", "binary", elf, binf])
     syms = {}
     for line in run([NM, elf]).stdout.splitlines():
@@ -139,10 +152,12 @@ def build(case_dir, test_c, kernel_files, opt):
     return binf, syms
 
 
-def simulate(binf, budget, dump_base, dump_size, dump_path, mode, width):
+def simulate(binf, budget, dump_base, dump_size, dump_path, mode, width, start_cycle=0):
     cmd = [RUN_TEST, binf, str(budget), f"{dump_base:x}", f"{dump_size:x}", dump_path]
-    if mode == "superscalar":
+    if mode == "superscalar" or start_cycle:
         cmd += [mode, str(width)]
+    if start_cycle:
+        cmd += [str(start_cycle)]     # cycle counter's start value
     r = run(cmd)
     a0 = int(re.findall(r"x10:\s*0x([0-9a-fA-F]+)", r.stdout)[-1], 16)
     cycles = int(re.findall(r"Cycles:\s*(\d+)", r.stdout)[-1])
@@ -191,6 +206,15 @@ def gemm_cases(large):
     return c
 
 
+def gemm_bt_cases(large):
+    """Every gemm case through nn_gemm_bt (Wt = W^T stored N x K), plus a
+    Wt view and a too-small ldt_wt -- docs/design/gemm_bt.md section 5."""
+    c = [dict(case, bt=True) for case in gemm_cases(large)]
+    c.append(dict(name="Wt view", M=20, K=40, N=24, bt=True, w_t0=1, w_extra=2))
+    c.append(dict(name="invalid: ldt_wt too small", M=16, K=33, N=16, bt=True, ldt_w_delta=-1, ret=-1))
+    return c
+
+
 def gemm_generate(case, rng):
     M, K, N = case["M"], case["K"], case["N"]
     rows = max(M, 1)
@@ -224,7 +248,16 @@ def gemm_generate(case, rng):
     xg = junk.integers(-128, 128, size=(Mt, ldt_x, TILE, TILE))   # junk outside the view
     place(xg, X, x_t0)
     x_off = d.add(grid_bytes(xg)) + x_t0 * TILE_BYTES + case.get("x_misalign", 0)
-    w_off = d.add(ref.to_tiles(W))
+    bt = case.get("bt", False)
+    if bt:   # Wt = W^T stored N x K, a view inside a wider buffer of junk
+        w_t0 = case.get("w_t0", 0)
+        ldt_w = w_t0 + Kt + case.get("w_extra", 0)
+        wg = junk.integers(-128, 128, size=(Nt, ldt_w, TILE, TILE))
+        place(wg, W.T, w_t0)
+        w_off = d.add(grid_bytes(wg)) + w_t0 * TILE_BYTES
+    else:
+        ldt_w = Nt
+        w_off = d.add(ref.to_tiles(W))
     b_off = 0
     if bias is not None:
         padded = np.zeros(ref.pad16(N), dtype=np.int64)
@@ -236,7 +269,8 @@ def gemm_generate(case, rng):
     d.define("X_OFF", x_off)
     d.define("LDT_X", ldt_x + case.get("ldt_x_delta", 0))
     d.define("W_OFF", w_off)
-    d.define("LDT_W", Nt)
+    d.define("LDT_W", ldt_w + case.get("ldt_w_delta", 0))
+    d.define("GEMM_BT", 1 if bt else 0)
     d.define("HAS_BIAS", 1 if bias is not None else 0)
     d.define("BIAS_OFF", b_off)
     d.define("Y_OFF", y_buf_off + y_t0 * TILE_BYTES)
@@ -249,7 +283,8 @@ def gemm_generate(case, rng):
     expected = yg.copy()
     ret = case.get("ret", 0)
     if ret == 0:
-        place(expected, ref.nn_gemm(X, W, bias, shift), y_t0)
+        out = ref.nn_gemm_bt(X, W.T, bias, shift) if bt else ref.nn_gemm(X, W, bias, shift)
+        place(expected, out, y_t0)
     expected_bytes = grid_bytes(expected) + bytes([POISON]) * GUARD_BYTES
     budget = 2_000_000 + Mt * Nt * (Kt * 40 + 200)
     layout = dict(rows=rows, ldt=ldt_y, t0=y_t0, M=M, N=N, tiles=Mt * ldt_y)
@@ -258,6 +293,9 @@ def gemm_generate(case, rng):
 
 def describe_byte(i, layout):
     """Which part of the output buffer byte i belongs to."""
+    if layout.get("flat"):
+        n = layout["flat"]
+        return f"result {i // 4}" if i < 4 * n else f"guard byte {i - 4 * n}"
     if i >= layout["tiles"] * TILE_BYTES:
         return f"guard byte {i - layout['tiles'] * TILE_BYTES}"
     t, within = divmod(i, TILE_BYTES)
@@ -271,11 +309,568 @@ def describe_byte(i, layout):
 
 
 # ---------------------------------------------------------------------
+# Lookup table -- docs/design/lut8.md
+# ---------------------------------------------------------------------
+
+def lut8_cases(large):
+    c = []
+    add = lambda name, rows, cols, **kw: c.append(dict(name=name, rows=rows, cols=cols, **kw))
+    add("one element", 1, 1)
+    add("one full tile", 16, 16)
+    add("edges", 17, 33)
+    add("partial block", 5, 27)
+    add("exactly one block", 8, 16)
+    add("many blocks", 40, 100)
+    add("one row, long", 1, 1000)
+    add("one column, long", 1000, 1)
+    add("identity table", 20, 40, table="identity")
+    add("constant table", 20, 40, table="const77")
+    add("views", 20, 40, x_t0=1, x_extra=2, y_t0=2, y_extra=0)   # ldt_x 6, ldt_y 5
+    add("in place", 20, 40, inplace=True)
+    add("launch splitting", 30, 33, cflags=["-DNN_MAX_OUTPUTS_PER_LAUNCH=300"])
+    add("invalid: rows = 0", 0, 16, ret=-1)
+    add("invalid: cols = 0", 16, 0, ret=-1)
+    add("invalid: table NULL", 16, 16, table="null", ret=-1)
+    add("invalid: ldt_x too small", 16, 33, ldt_x_delta=-1, ret=-1)
+    add("invalid: X == Y, different ldt", 16, 16, alias_bad=True, ret=-1)
+    if large:
+        add("large 256x4096", 256, 4096, scalar_only=True)
+        add("large 1000x1000", 1000, 1000, scalar_only=True)
+        # 8,396,800 elements: more than one launch can hold (65,535 x 128 = 8,388,480)
+        add("large, needs 2 launches", 2048, 4100, scalar_only=True)
+    return c
+
+
+def set_real(grid, mat, t0):
+    """Write only mat's real elements into grid's tile columns t0..;
+    everything else in grid (padding included) keeps its value."""
+    rows, cols = mat.shape
+    r = np.arange(rows)[:, None]
+    c = np.arange(cols)[None, :]
+    grid[r >> 4, t0 + (c >> 4), r & 15, c & 15] = mat
+
+
+def lut8_generate(case, rng):
+    rows, cols = case["rows"], case["cols"]
+    R, C = max(rows, 1), max(cols, 1)
+    kind = case.get("table", "random")
+    if kind == "identity":
+        table = np.arange(256) - 128
+    elif kind == "const77":
+        table = np.full(256, 77)
+    else:
+        table = rng.integers(-128, 128, size=256)
+    X = rng.integers(-128, 128, size=(R, C))
+    ret = case.get("ret", 0)
+
+    Rt, Ct = ref.pad16(R) // TILE, ref.pad16(C) // TILE
+    x_t0, y_t0 = case.get("x_t0", 0), case.get("y_t0", 0)
+    ldt_x = x_t0 + Ct + case.get("x_extra", 0)
+    ldt_y = y_t0 + Ct + case.get("y_extra", 0)
+
+    d = Data()
+    table_off = d.add(table.astype(np.int8).tobytes())
+    junk = np.random.default_rng(rng.integers(1 << 30) + JUNK_SEED_OFFSET)
+    guard = bytes([POISON]) * GUARD_BYTES
+    if case.get("inplace"):
+        # One buffer, junk outside the real elements (padding included);
+        # the result replaces the real elements and nothing else.
+        g = junk.integers(-128, 128, size=(Rt, ldt_x, TILE, TILE))
+        set_real(g, X, x_t0)
+        buf_off = d.add(grid_bytes(g) + guard)
+        x_off = y_off = buf_off + x_t0 * TILE_BYTES
+        ldt_y, y_t0 = ldt_x, x_t0
+        expected = g
+    else:
+        xg = junk.integers(-128, 128, size=(Rt, ldt_x, TILE, TILE))   # junk in padding and outside the view
+        set_real(xg, X, x_t0)
+        x_off = d.add(grid_bytes(xg)) + x_t0 * TILE_BYTES
+        yg = tile_grid(R, ldt_y, POISON)                              # padding poisoned too
+        buf_off = d.add(grid_bytes(yg) + guard)
+        y_off = buf_off + y_t0 * TILE_BYTES
+        expected = yg.copy()
+    ldt_x_arg = ldt_x + case.get("ldt_x_delta", 0)
+    if case.get("alias_bad"):
+        x_off, ldt_x_arg = y_off, ldt_y + 1
+
+    d.define("X_OFF", x_off)
+    d.define("LDT_X", ldt_x_arg)
+    d.define("Y_OFF", y_off)
+    d.define("LDT_Y", ldt_y)
+    d.define("LUT_ROWS", f"{rows}u")
+    d.define("LUT_COLS", f"{cols}u")
+    d.define("HAS_TABLE", 0 if kind == "null" else 1)
+    d.define("TABLE_OFF", table_off)
+
+    if ret == 0:
+        set_real(expected, ref.nn_lut8(X, table), y_t0)
+    expected_bytes = grid_bytes(expected) + guard
+    budget = 2_000_000 + 4 * R * C
+    layout = dict(rows=R, ldt=ldt_y, t0=y_t0, M=rows, N=cols, tiles=Rt * ldt_y)
+    return d, buf_off, expected_bytes, ret, budget, layout
+
+
+# ---------------------------------------------------------------------
+# Element-wise add / multiply -- docs/design/eltwise.md
+# ---------------------------------------------------------------------
+
+def eltwise_cases(large):
+    c = []
+    for op in ("add", "mul"):
+        add = lambda name, rows, cols, **kw: c.append(dict(name=f"{op}: {name}", op=op,
+                                                           rows=rows, cols=cols, **kw))
+        add("one element", 1, 1)
+        add("edges", 17, 33)
+        add("partial block", 5, 27)
+        add("many blocks", 40, 100)
+        add("shift 0", 20, 40, shift=0)
+        add("shift 31", 20, 40, shift=31)
+        add("rounding, shift 1", 16, 16, fill="small", shift=1)
+        add("rounding, shift 2", 16, 16, fill="small", shift=2)
+        add("saturate low", 16, 16, fill="sat_low", shift=0)
+        add("saturate high", 16, 16, fill="sat_high", shift=0)
+        add("clamp boundary", 2, 10, fill="boundary", shift=0)
+        add("views", 20, 40, a_t0=1, a_extra=2, b_t0=0, b_extra=0, y_t0=2, y_extra=2)  # ldt 6, 3, 7
+        add("in place, Y == A", 20, 40, inplace="A")
+        add("in place, Y == B", 20, 40, inplace="B")
+        add("A == B", 20, 40, same=True)
+        add("launch splitting", 30, 33, cflags=["-DNN_MAX_OUTPUTS_PER_LAUNCH=300"])
+        add("invalid: rows = 0", 0, 16, ret=-1)
+        add("invalid: cols = 0", 16, 0, ret=-1)
+        add("invalid: B NULL", 16, 16, b_null=True, ret=-1)
+        add("invalid: ldt_b too small", 16, 33, ldt_b_delta=-1, ret=-1)
+        add("invalid: shift 32", 16, 16, shift=32, ret=-1)
+        add("invalid: Y == A, different ldt", 16, 16, alias_bad="A", ret=-1)
+        add("invalid: Y == B, different ldt", 16, 16, alias_bad="B", ret=-1)
+        if op == "add":
+            add("scales sa 2, sb 0", 20, 40, sa=2, sb=0)
+            add("scales sa 0, sb 3", 20, 40, sa=0, sb=3)
+            add("scales sa = sb = 16", 20, 40, sa=16, sb=16)
+            add("invalid: sa 17", 16, 16, sa=17, ret=-1)
+            add("invalid: sb 17", 16, 16, sb=17, ret=-1)
+        if large:
+            add("large 256x4096", 256, 4096, scalar_only=True)
+            if op == "add":
+                # 8,396,800 elements: more than one launch can hold
+                add("large, needs 2 launches", 2048, 4100, scalar_only=True)
+    return c
+
+
+def eltwise_generate(case, rng):
+    op, rows, cols = case["op"], case["rows"], case["cols"]
+    R, C = max(rows, 1), max(cols, 1)
+    fill = case.get("fill", "random")
+    if fill == "small":          # small values: v lands exactly on halves often, both signs
+        A, B = rng.integers(-8, 9, size=(R, C)), rng.integers(-8, 9, size=(R, C))
+    elif fill == "sat_low":      # add: -256 -> -128;  mul: 16384 -> 127
+        A, B = np.full((R, C), -128), np.full((R, C), -128)
+    elif fill == "sat_high":     # add: 254 -> 127;    mul: -16256 -> -128
+        A, B = np.full((R, C), 127), np.full((R, C), 127 if op == "add" else -128)
+    elif fill == "boundary":     # v exactly on both sides of each clamp edge (shift 0)
+        vs = [125, 126, 127, 128, 129, -126, -127, -128, -129, -130]
+        if op == "add":
+            a = [v // 2 for v in vs]
+            b = [v - x for v, x in zip(vs, a)]
+        else:                    # a * b = v with both factors int8
+            pairs = {125: (5, 25), 126: (2, 63), 127: (1, 127), 128: (2, 64), 129: (3, 43),
+                     -126: (-2, 63), -127: (-1, 127), -128: (-2, 64), -129: (-3, 43), -130: (-2, 65)}
+            a = [pairs[v][0] for v in vs]
+            b = [pairs[v][1] for v in vs]
+        A = np.array([a, b])     # row 1 swaps the operands
+        B = np.array([b, a])
+    else:
+        A, B = rng.integers(-128, 128, size=(R, C)), rng.integers(-128, 128, size=(R, C))
+    sa, sb = case.get("sa", 0), case.get("sb", 0)
+    shift = case.get("shift")
+    if shift is None:            # keep most outputs inside int8 rather than saturated
+        shift = max(sa, sb) + 1 if op == "add" else 7
+    ret = case.get("ret", 0)
+
+    Rt, Ct = ref.pad16(R) // TILE, ref.pad16(C) // TILE
+    a_t0, b_t0, y_t0 = case.get("a_t0", 0), case.get("b_t0", 0), case.get("y_t0", 0)
+    ldt_a = a_t0 + Ct + case.get("a_extra", 0)
+    ldt_b = b_t0 + Ct + case.get("b_extra", 0)
+    ldt_y = y_t0 + Ct + case.get("y_extra", 0)
+    inplace = case.get("inplace")
+
+    d = Data()
+    junk = np.random.default_rng(rng.integers(1 << 30) + JUNK_SEED_OFFSET)
+    guard = bytes([POISON]) * GUARD_BYTES
+
+    def input_grid(mat, t0, ldt, with_guard):
+        g = junk.integers(-128, 128, size=(Rt, ldt, TILE, TILE))   # junk in padding and outside the view
+        set_real(g, mat, t0)
+        buf = d.add(grid_bytes(g) + (guard if with_guard else b""))
+        return g, buf, buf + t0 * TILE_BYTES
+
+    ag, a_buf, a_off = input_grid(A, a_t0, ldt_a, inplace == "A")
+    if case.get("same"):
+        B, bg, b_buf, b_off, ldt_b, b_t0 = A, ag, a_buf, a_off, ldt_a, a_t0
+    else:
+        bg, b_buf, b_off = input_grid(B, b_t0, ldt_b, inplace == "B")
+    if inplace == "A":
+        y_buf, y_off, ldt_y, y_t0, expected = a_buf, a_off, ldt_a, a_t0, ag.copy()
+    elif inplace == "B":
+        y_buf, y_off, ldt_y, y_t0, expected = b_buf, b_off, ldt_b, b_t0, bg.copy()
+    else:
+        yg = tile_grid(R, ldt_y, POISON)                              # padding poisoned too
+        y_buf = d.add(grid_bytes(yg) + guard)
+        y_off = y_buf + y_t0 * TILE_BYTES
+        expected = yg.copy()
+    ldt_y_arg = ldt_y
+    if case.get("alias_bad") == "A":          # nothing may be written, so Y's own buffer stays poison
+        y_off, ldt_y_arg = a_off, ldt_a + 1
+    elif case.get("alias_bad") == "B":
+        y_off, ldt_y_arg = b_off, ldt_b + 1
+
+    d.define("ELT_OP", 0 if op == "add" else 1)
+    d.define("A_OFF", a_off)
+    d.define("LDT_A", ldt_a)
+    d.define("ELT_SA", f"{sa}u")
+    d.define("B_OFF", b_off)
+    d.define("LDT_B", ldt_b + case.get("ldt_b_delta", 0))
+    d.define("ELT_SB", f"{sb}u")
+    d.define("HAS_B", 0 if case.get("b_null") else 1)
+    d.define("Y_OFF", y_off)
+    d.define("LDT_Y", ldt_y_arg)
+    d.define("ELT_ROWS", f"{rows}u")
+    d.define("ELT_COLS", f"{cols}u")
+    d.define("ELT_SHIFT", f"{shift}u")
+
+    if ret == 0:
+        out = ref.nn_add(A, B, sa, sb, shift) if op == "add" else ref.nn_mul(A, B, shift)
+        set_real(expected, out, y_t0)
+    expected_bytes = grid_bytes(expected) + guard
+    budget = 2_000_000 + 6 * R * C
+    layout = dict(rows=R, ldt=ldt_y, t0=y_t0, M=rows, N=cols, tiles=Rt * ldt_y)
+    return d, y_buf, expected_bytes, ret, budget, layout
+
+
+# ---------------------------------------------------------------------
+# Softmax -- docs/design/softmax.md
+# ---------------------------------------------------------------------
+
+def softmax_cases(large):
+    c = []
+    add = lambda name, rows, cols, **kw: c.append(dict(name=name, rows=rows, cols=cols, **kw))
+    add("one element", 1, 1)
+    add("one column", 40, 1)
+    add("one row", 1, 16)
+    add("edges", 17, 33)
+    add("partial block", 5, 20)
+    add("exactly one block", 32, 16)
+    add("many blocks", 300, 20)
+    add("long rows", 3, 4000)
+    add("exp table", 40, 64, table="exp")
+    add("ties", 20, 30, table="ties", fill="ties")
+    add("uniform rows", 20, 3, fill="uniform")
+    add("full range", 16, 16, fill="full_range")
+    add("all negative", 20, 30, fill="negative")    # row max < 0: a max that starts above -128 shows
+    add("largest sums", 2, 4000, table="max")
+    add("views", 20, 40, x_t0=1, x_extra=2, y_t0=2, y_extra=0)   # ldt_x 6, ldt_y 5
+    add("in place", 20, 40, inplace=True)
+    add("launch splitting", 45, 10, cflags=["-DNN_MAX_ROWS_PER_LAUNCH=10"])
+    add("invalid: rows = 0", 0, 16, ret=-1)
+    add("invalid: cols = 0", 16, 0, ret=-1)
+    add("invalid: cols = 65536", 1, 65536, ret=-1)
+    add("invalid: table NULL", 16, 16, table="null", ret=-1)
+    add("invalid: table[0] = 0", 16, 16, table="zero0", ret=-1)
+    add("invalid: ldt_x too small", 16, 33, ldt_x_delta=-1, ret=-1)
+    add("invalid: X == Y, different ldt", 16, 16, alias_bad=True, ret=-1)
+    if large:
+        add("large 1024x128", 1024, 128, scalar_only=True)
+        add("large 2048x1000", 2048, 1000, scalar_only=True)
+        # more rows than one launch holds (65,535 x 32 = 2,097,120); in place
+        # because two tensors this size wouldn't fit in RAM
+        add("large, needs 2 launches", 2097200, 1, inplace=True, scalar_only=True)
+    return c
+
+
+def softmax_generate(case, rng):
+    rows, cols = case["rows"], case["cols"]
+    R, C = max(rows, 1), max(cols, 1)
+    kind = case.get("table", "random")
+    if kind == "exp":
+        table = ref.exp_table(1 / 16)
+    elif kind == "ties":           # only the maxima count
+        table = np.zeros(256, dtype=np.int64)
+        table[0] = 1
+    elif kind == "max":
+        table = np.full(256, 0xFFFF)
+    else:
+        table = rng.integers(1, 1 << 16, size=256)
+        if kind == "zero0":
+            table[0] = 0
+    fill = case.get("fill", "random")
+    if fill == "ties":             # row r has r % 3 + 1 maxima
+        X = rng.integers(-128, 100, size=(R, C))
+        for r in range(R):
+            X[r, rng.choice(C, size=r % 3 + 1, replace=False)] = 120
+    elif fill == "uniform":
+        X = np.repeat(rng.integers(-128, 128, size=(R, 1)), C, axis=1)
+    elif fill == "negative":
+        X = rng.integers(-128, 0, size=(R, C))
+    else:
+        X = rng.integers(-128, 128, size=(R, C))
+        if fill == "full_range":
+            X[:, 0], X[:, 1] = -128, 127
+    ret = case.get("ret", 0)
+
+    # int8 grids throughout: the largest case is a 33 MB tensor
+    Rt, Ct = ref.pad16(R) // TILE, ref.pad16(C) // TILE
+    x_t0, y_t0 = case.get("x_t0", 0), case.get("y_t0", 0)
+    ldt_x = x_t0 + Ct + case.get("x_extra", 0)
+    ldt_y = y_t0 + Ct + case.get("y_extra", 0)
+
+    d = Data()
+    table_off = d.add(table.astype("<u2").tobytes())
+    junk = np.random.default_rng(rng.integers(1 << 30) + JUNK_SEED_OFFSET)
+    guard = bytes([POISON]) * GUARD_BYTES
+    xg = junk.integers(-128, 128, size=(Rt, ldt_x, TILE, TILE), dtype=np.int8)   # junk in padding
+    set_real(xg, X, x_t0)
+    if case.get("inplace"):
+        buf_off = d.add(xg.tobytes() + guard)
+        x_off = y_off = buf_off + x_t0 * TILE_BYTES
+        ldt_y, y_t0 = ldt_x, x_t0
+        expected = xg
+    else:
+        x_off = d.add(xg.tobytes()) + x_t0 * TILE_BYTES
+        yg = np.full((Rt, ldt_y, TILE, TILE), POISON, dtype=np.int8)               # padding poisoned too
+        buf_off = d.add(yg.tobytes() + guard)
+        y_off = buf_off + y_t0 * TILE_BYTES
+        expected = yg
+    ldt_x_arg = ldt_x + case.get("ldt_x_delta", 0)
+    if case.get("alias_bad"):
+        x_off, ldt_x_arg = y_off, ldt_y + 1
+
+    d.define("X_OFF", x_off)
+    d.define("LDT_X", ldt_x_arg)
+    d.define("Y_OFF", y_off)
+    d.define("LDT_Y", ldt_y)
+    d.define("SM_ROWS", f"{rows}u")
+    d.define("SM_COLS", f"{cols}u")
+    d.define("HAS_TABLE", 0 if kind == "null" else 1)
+    d.define("TABLE_OFF", table_off)
+
+    if ret == 0:
+        set_real(expected, ref.nn_softmax(X, table), y_t0)   # expected may alias xg: X was copied out already
+    expected_bytes = expected.tobytes() + guard
+    warps_per_sm = (math.ceil(R / 32) + 3) // 4
+    budget = 2_000_000 + 2 * warps_per_sm * (200 * C + 300)
+    layout = dict(rows=R, ldt=ldt_y, t0=y_t0, M=rows, N=cols, tiles=Rt * ldt_y)
+    return d, buf_off, expected_bytes, ret, budget, layout
+
+
+# ---------------------------------------------------------------------
+# Layer normalization -- docs/design/layernorm.md
+# ---------------------------------------------------------------------
+
+def layernorm_cases(large):
+    c = []
+    add = lambda name, rows, cols, **kw: c.append(dict(name=name, rows=rows, cols=cols, **kw))
+    add("one element", 1, 1)
+    add("constant rows", 20, 30, fill="constant")
+    add("smallest spread", 20, 30, fill="min_spread")
+    add("one outlier", 16, 64, fill="outlier")
+    add("largest spread", 16, 64, fill="max_spread")
+    add("variance a small perfect square", 20, 4, fill="square")   # V = 16, q = 4 exactly
+    add("edges", 17, 33)
+    add("partial block", 5, 20)
+    add("exactly one block", 32, 16)
+    add("many blocks", 300, 20)
+    add("long rows", 3, 4000)
+    add("model-sized rows", 40, 384, params="model")
+    add("shift 0", 20, 40, shift=0)
+    add("shift 31", 20, 40, shift=31)
+    add("views", 20, 40, x_t0=1, x_extra=2, y_t0=2, y_extra=0)   # ldt_x 6, ldt_y 5
+    add("in place", 20, 40, inplace=True)
+    add("launch splitting", 45, 10, cflags=["-DNN_MAX_ROWS_PER_LAUNCH=10"])
+    add("invalid: rows = 0", 0, 16, ret=-1)
+    add("invalid: cols = 0", 16, 0, ret=-1)
+    add("invalid: cols = 32768", 1, 32768, ret=-1)
+    add("invalid: gamma NULL", 16, 16, gamma_null=True, ret=-1)
+    add("invalid: beta NULL", 16, 16, beta_null=True, ret=-1)
+    add("invalid: ldt_x too small", 16, 33, ldt_x_delta=-1, ret=-1)
+    add("invalid: shift 32", 16, 16, shift=32, ret=-1)
+    add("invalid: X == Y, different ldt", 16, 16, alias_bad=True, ret=-1)
+    if large:
+        add("large 1024x384", 1024, 384, params="model", scalar_only=True)
+        add("large 2048x1536", 2048, 1536, params="model", scalar_only=True)
+        # more rows than one launch holds (65,535 x 32 = 2,097,120); in place
+        # because two tensors this size wouldn't fit in RAM
+        add("large, needs 2 launches", 2097200, 1, inplace=True, scalar_only=True)
+    return c
+
+
+def layernorm_generate(case, rng):
+    rows, cols = case["rows"], case["cols"]
+    R, C = max(rows, 1), max(cols, 1)
+    fill = case.get("fill", "random")
+    if fill == "constant":
+        X = np.repeat(rng.integers(-128, 128, size=(R, 1)), C, axis=1)
+    elif fill == "min_spread":         # all v except one element v +- 1: V = n - 1
+        v = rng.integers(-127, 127, size=(R, 1))
+        X = np.repeat(v, C, axis=1)
+        X[np.arange(R), rng.integers(0, C, size=R)] += rng.choice([-1, 1], size=R)
+    elif fill == "outlier":
+        X = np.zeros((R, C), dtype=np.int64)
+        X[np.arange(R), rng.integers(0, C, size=R)] = 127
+    elif fill == "max_spread":
+        X = np.where(np.arange(C)[None, :] % 2 == 0, -128, 127).repeat(R, axis=0)
+    elif fill == "square":             # rows [a, a, a+2, a+2] shuffled: V = 16, q = 4
+        a = rng.integers(-128, 126, size=(R, 1))
+        X = a + np.array([[0, 0, 2, 2]])
+        for r in range(R):
+            rng.shuffle(X[r])
+    else:
+        X = rng.integers(-128, 128, size=(R, C))
+    if case.get("params") == "model":  # gamma near 1.0 at scale 1/64, small beta
+        gamma = rng.integers(48, 81, size=C)
+        beta = rng.integers(-256, 257, size=C)
+        default_shift = 2
+    else:
+        gamma = rng.integers(-128, 128, size=C)
+        beta = rng.integers(-(1 << 12), (1 << 12) + 1, size=C)
+        default_shift = 5
+    shift = case.get("shift", default_shift)
+    ret = case.get("ret", 0)
+
+    # int8 grids throughout: the largest case is a 33 MB tensor
+    Rt, Ct = ref.pad16(R) // TILE, ref.pad16(C) // TILE
+    x_t0, y_t0 = case.get("x_t0", 0), case.get("y_t0", 0)
+    ldt_x = x_t0 + Ct + case.get("x_extra", 0)
+    ldt_y = y_t0 + Ct + case.get("y_extra", 0)
+
+    d = Data()
+    gamma_off = d.add(gamma.astype(np.int8).tobytes())
+    beta_off = d.add(beta.astype("<i4").tobytes())
+    junk = np.random.default_rng(rng.integers(1 << 30) + JUNK_SEED_OFFSET)
+    guard = bytes([POISON]) * GUARD_BYTES
+    xg = junk.integers(-128, 128, size=(Rt, ldt_x, TILE, TILE), dtype=np.int8)   # junk in padding
+    set_real(xg, X, x_t0)
+    if case.get("inplace"):
+        buf_off = d.add(xg.tobytes() + guard)
+        x_off = y_off = buf_off + x_t0 * TILE_BYTES
+        ldt_y, y_t0 = ldt_x, x_t0
+        expected = xg
+    else:
+        x_off = d.add(xg.tobytes()) + x_t0 * TILE_BYTES
+        yg = np.full((Rt, ldt_y, TILE, TILE), POISON, dtype=np.int8)               # padding poisoned too
+        buf_off = d.add(yg.tobytes() + guard)
+        y_off = buf_off + y_t0 * TILE_BYTES
+        expected = yg
+    ldt_x_arg = ldt_x + case.get("ldt_x_delta", 0)
+    if case.get("alias_bad"):
+        x_off, ldt_x_arg = y_off, ldt_y + 1
+
+    d.define("X_OFF", x_off)
+    d.define("LDT_X", ldt_x_arg)
+    d.define("Y_OFF", y_off)
+    d.define("LDT_Y", ldt_y)
+    d.define("LN_ROWS", f"{rows}u")
+    d.define("LN_COLS", f"{cols}u")
+    d.define("HAS_GAMMA", 0 if case.get("gamma_null") else 1)
+    d.define("GAMMA_OFF", gamma_off)
+    d.define("HAS_BETA", 0 if case.get("beta_null") else 1)
+    d.define("BETA_OFF", beta_off)
+    d.define("LN_SHIFT", f"{shift}u")
+
+    if ret == 0:
+        set_real(expected, ref.nn_layernorm(X, gamma, beta, shift), y_t0)
+    expected_bytes = expected.tobytes() + guard
+    warps_per_sm = (math.ceil(R / 32) + 3) // 4
+    budget = 2_000_000 + 2 * warps_per_sm * (220 * C + 2000)
+    layout = dict(rows=R, ldt=ldt_y, t0=y_t0, M=rows, N=cols, tiles=Rt * ldt_y)
+    return d, buf_off, expected_bytes, ret, budget, layout
+
+
+# ---------------------------------------------------------------------
+# nn_isqrt64 on its own (used by layernorm) -- docs/design/layernorm.md section 3.
+# The layernorm cases can't reach V >= 2^42 (rows that long exceed the GPU's
+# per-block issue cap), so the top of the range is tested here on the host.
+# ---------------------------------------------------------------------
+
+def isqrt_cases(large):
+    return [dict(name="chosen values 0 ... 2^44 - 1")]
+
+
+def isqrt_generate(case, rng):
+    import math
+    vals = {0, 1, 2, 3, 4, 5, 8, 9, 10, 15, 16, 17,
+            (1 << 32) - 1, 1 << 32, (1 << 32) + 1, (1 << 42) - 1, 1 << 42, (1 << 44) - 1}
+    for k in [1, 2, 3, 255, 256, 65535, 65536, (1 << 21) - 1, 1 << 21, (1 << 22) - 1,
+              *rng.integers(1, 1 << 22, size=40).tolist()]:
+        for v in (k * k - 1, k * k, k * k + 1):       # around every perfect square
+            if 0 <= v < (1 << 44):
+                vals.add(v)
+    vals |= set(rng.integers(0, 1 << 44, size=100).tolist())
+    vals = sorted(vals)
+    n = len(vals)
+
+    d = Data()
+    words = bytearray()
+    for v in vals:
+        words += (v >> 32).to_bytes(4, "little") + (v & 0xFFFFFFFF).to_bytes(4, "little")
+    v_off = d.add(bytes(words))
+    guard = bytes([POISON]) * GUARD_BYTES
+    out_off = d.add(bytes([POISON]) * (4 * n) + guard)
+    d.define("ISQRT_N", f"{n}u")
+    d.define("V_OFF", v_off)
+    d.define("Q_OFF", out_off)
+    expected = b"".join(math.isqrt(v).to_bytes(4, "little") for v in vals) + guard
+    return d, out_off, expected, n, 2_000_000, dict(flat=n)
+
+
+# ---------------------------------------------------------------------
+# nn_cycles() on its own -- docs/design/cycle_counter.md section 4. The
+# counter starts at 2^32 - 300 + d: 32 consecutive d values put the wrap at
+# every point of t_cycles.c's sampling loop (about 20 cycles per sample on the
+# scalar host at -O2), so at least one of them lands it between nn_cycles()'s
+# high and low reads.
+# ---------------------------------------------------------------------
+
+CYCLE_START_BASE = (1 << 32) - 300
+
+
+def cycles_cases(large):
+    return [dict(name=f"64-bit read across the wrap, start 2^32 - {300 - d}",
+                 start_cycle=CYCLE_START_BASE + d) for d in range(32)]
+
+
+def cycles_generate(case, rng):
+    d = Data()
+    guard = bytes([POISON]) * GUARD_BYTES
+    out_off = d.add(guard)                  # nothing written; the guard must stay intact
+    d.define("CYCLE_SAMPLES", "64u")
+    d.define("CYCLE_START", f"{case['start_cycle']}ull")
+    return d, out_off, guard, 0, 100_000, dict(flat=0)
+
+
+# ---------------------------------------------------------------------
 
 LEGOS = {
+    "cycles": dict(cases=cycles_cases, generate=cycles_generate,
+                   test_c=os.path.join(TESTS, "t_cycles.c"), kernels=[]),
+    "isqrt": dict(cases=isqrt_cases, generate=isqrt_generate,
+                  test_c=os.path.join(TESTS, "t_isqrt.c"), kernels=[]),
     "gemm": dict(cases=gemm_cases, generate=gemm_generate,
                  test_c=os.path.join(TESTS, "t_gemm.c"),
-                 kernels=[os.path.join(KERNELS, "gemm.c")]),
+                 kernels=[(os.path.join(KERNELS, "gemm.c"), None)]),
+    "gemm_bt": dict(cases=gemm_bt_cases, generate=gemm_generate,
+                    test_c=os.path.join(TESTS, "t_gemm.c"),
+                    kernels=[(os.path.join(KERNELS, "gemm.c"), None)]),
+    "lut8": dict(cases=lut8_cases, generate=lut8_generate,
+                 test_c=os.path.join(TESTS, "t_lut8.c"),
+                 kernels=[(os.path.join(KERNELS, "lut8.c"), "O0")]),
+    "eltwise": dict(cases=eltwise_cases, generate=eltwise_generate,
+                    test_c=os.path.join(TESTS, "t_eltwise.c"),
+                    kernels=[(os.path.join(KERNELS, "eltwise.c"), "O0")]),
+    "softmax": dict(cases=softmax_cases, generate=softmax_generate,
+                    test_c=os.path.join(TESTS, "t_softmax.c"),
+                    kernels=[(os.path.join(KERNELS, "softmax.c"), "O0")]),
+    "layernorm": dict(cases=layernorm_cases, generate=layernorm_generate,
+                      test_c=os.path.join(TESTS, "t_layernorm.c"),
+                      kernels=[(os.path.join(KERNELS, "layernorm.c"), "O0")]),
 }
 
 
@@ -287,15 +882,20 @@ def run_lego(lego, large, seed, opt):
         d, dump_off, expected, ret, budget, layout = spec["generate"](case, rng)
         case_dir = os.path.join(BUILD_DIR, lego, f"case{idx:02d}")
         d.write(case_dir)
-        binf, syms = build(case_dir, spec["test_c"], spec["kernels"], opt)
+        binf, syms = build(case_dir, spec["test_c"], spec["kernels"], opt, case.get("cflags", []))
         dump_base = syms["nn_data"] + dump_off
         results = []
         ok = True
-        for mode, width in [("scalar", 0)] + [("superscalar", w) for w in SUPERSCALAR_WIDTHS]:
+        modes = [("scalar", 0)]
+        if not case.get("scalar_only"):
+            modes += [("superscalar", w) for w in SUPERSCALAR_WIDTHS]
+        for mode, width in modes:
             tag = "scalar" if mode == "scalar" else f"w{width}"
             dump_path = os.path.join(case_dir, f"dump_{tag}.txt")
+            start = case.get("start_cycle", 0)
             a0, cycles, actual, stderr = simulate(binf, budget, dump_base, len(expected),
-                                                  dump_path, mode, width)
+                                                  dump_path, mode, width, start)
+            cycles -= start
             problems = []
             if cycles >= budget:
                 problems.append(f"did not halt within {budget} cycles")

@@ -208,9 +208,8 @@ Programs with NPU legos are also run on the superscalar host (`issue width` 1 / 
   and after each lego call, and stores the difference in a results array that the
   driver dumps along with the outputs. This covers NPU legos (host cycles) and GPU legos
   (launch + device cycles) the same way.
-  - The host CPU has no way to read its cycle counter today (no CSR support). The plan
-    is the standard RISC-V `rdcycle` / `rdcycleh`. That is a small 32I change with its
-    own design file, `cycle_counter.md`, still to be written.
+  - The counter is read with the standard RISC-V `rdcycle` / `rdcycleh`, through
+    `nn_cycles()` in `nn.h` (host code only). See [cycle_counter.md](cycle_counter.md).
 - **Issue cap.** `GridLauncher` abandons a block after a fixed number of issued
   instructions (1,000,000 by default) to catch runaway kernels. Single-thread and
   row-wise GPU legos can legitimately exceed that, so `32I/tests/basic/main.cpp` raises
