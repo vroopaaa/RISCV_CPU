@@ -17,6 +17,9 @@
 //   7. X1  = X + A (first residual)               GPU: nn_add, one thread per element
 //   8. XN2 = LayerNorm(X1), no learned weights    GPU: as step 1
 //   9. H   = XN2 . W1, no bias (MLP first layer)  NPU: nn_gemm
+//  10. G   = GELU(H)                              GPU: nn_lut8, one thread per element
+//  11. F   = G . W2, no bias (MLP second layer)   NPU: nn_gemm
+//  12. Y   = X1 + F (second residual)             GPU: nn_add, one thread per element
 //
 // Every tensor is in CRUDA's padded 16 x 16 tile layout (nn.h). Compiled
 // -O2; the GPU lego files -O0.
@@ -60,6 +63,11 @@ static const int8_t W1[] __attribute__((aligned(NN_TILE_BYTES))) = {
 };
 _Static_assert(sizeof W1 == VIT_DIM * VIT_HIDDEN, "the W1 file doesn't match vit.h's sizes");
 
+static const int8_t W2[] __attribute__((aligned(NN_TILE_BYTES))) = {
+#include "input/tile_major/W2_1536_384.txt"
+};
+_Static_assert(sizeof W2 == VIT_HIDDEN * VIT_DIM, "the W2 file doesn't match vit.h's sizes");
+
 // nn_layernorm takes per-column gamma and beta; no weights means gamma = 1.0
 // and beta = 0 in every column.
 static int8_t  ln_gamma[VIT_DIM];
@@ -74,16 +82,25 @@ static int8_t A[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));    
 static int8_t X1[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));    // first residual
 static int8_t XN2[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // LN2's output
 
+static int8_t H[VIT_ROWS * VIT_HIDDEN] __attribute__((aligned(NN_TILE_BYTES)));  // FC1's output
+static int8_t G[VIT_ROWS * VIT_HIDDEN] __attribute__((aligned(NN_TILE_BYTES)));  // GELU's output
+static int8_t F[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));     // FC2's output
+
 static const uint16_t exp_table[] = {
 #include "input/exp_table_256.txt"
 };
 _Static_assert(sizeof exp_table == 256 * sizeof(uint16_t), "the exp table must have 256 values");
 
+static const int8_t gelu_table[] = {
+#include "input/gelu_table_256.txt"
+};
+_Static_assert(sizeof gelu_table == 256, "the GELU table must have 256 values");
+
 // Read by run_vit.py after the run: the output (tile layout), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_ROWS * VIT_HIDDEN] __attribute__((aligned(NN_TILE_BYTES)));   // FC1's output H
+int8_t         vit_out[VIT_ROWS * VIT_DIM] __attribute__((aligned(NN_TILE_BYTES)));   // the block's output Y
 const uint32_t vit_out_rows = VIT_ROWS;
-const uint32_t vit_out_cols = VIT_HIDDEN;
+const uint32_t vit_out_cols = VIT_DIM;
 uint64_t       vit_cycles;
 uint64_t       vit_cycles_layernorm1;
 uint64_t       vit_cycles_qkv;
@@ -94,6 +111,9 @@ uint64_t       vit_cycles_proj;
 uint64_t       vit_cycles_residual1;
 uint64_t       vit_cycles_layernorm2;
 uint64_t       vit_cycles_fc1;
+uint64_t       vit_cycles_gelu;
+uint64_t       vit_cycles_fc2;
+uint64_t       vit_cycles_residual2;
 
 // Step 3. For batch b and head h, in tiles (tile = 16 x 16):
 //   Q_h  = QKV rows of batch b, columns h * 64 ..       2 x 4 tiles at tile (2b, 4h)
@@ -168,8 +188,16 @@ int main(void) {
     r |= nn_layernorm(X1, VIT_LDT, XN2, VIT_LDT, VIT_ROWS, VIT_DIM, ln_gamma, ln_beta, 0);
     uint64_t t8 = nn_cycles();
     r |= nn_gemm(XN2, VIT_LDT, W1, VIT_LDT_HID, 0,
-                 vit_out, VIT_LDT_HID, VIT_ROWS, VIT_DIM, VIT_HIDDEN, VIT_FC1_SHIFT);
+                 H, VIT_LDT_HID, VIT_ROWS, VIT_DIM, VIT_HIDDEN, VIT_FC1_SHIFT);
     uint64_t t9 = nn_cycles();
+    r |= nn_lut8(H, VIT_LDT_HID, G, VIT_LDT_HID, VIT_ROWS, VIT_HIDDEN, gelu_table);
+    uint64_t t10 = nn_cycles();
+    r |= nn_gemm(G, VIT_LDT_HID, W2, VIT_LDT, 0,
+                 F, VIT_LDT, VIT_ROWS, VIT_HIDDEN, VIT_DIM, VIT_FC2_SHIFT);
+    uint64_t t11 = nn_cycles();
+    r |= nn_add(X1, VIT_LDT, VIT_RES2_X1_UP, F, VIT_LDT, 0,
+                vit_out, VIT_LDT, VIT_ROWS, VIT_DIM, VIT_RES2_SHIFT);
+    uint64_t t12 = nn_cycles();
 
     vit_cycles_layernorm1 = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
@@ -180,6 +208,9 @@ int main(void) {
     vit_cycles_residual1 = t7 - t6;
     vit_cycles_layernorm2 = t8 - t7;
     vit_cycles_fc1       = t9 - t8;
-    vit_cycles           = t9 - t0;
+    vit_cycles_gelu      = t10 - t9;
+    vit_cycles_fc2       = t11 - t10;
+    vit_cycles_residual2 = t12 - t11;
+    vit_cycles           = t12 - t0;
     return r;
 }

@@ -15,6 +15,9 @@
 //   7. X1  = X + A (first residual)                       VIT_ROWS x VIT_DIM
 //   8. XN2 = LayerNorm(X1), no learned weights            VIT_ROWS x VIT_DIM
 //   9. H   = XN2 . W1, no bias (MLP first layer)          VIT_ROWS x VIT_HIDDEN
+//  10. G   = GELU(H), through a 256-entry table           VIT_ROWS x VIT_HIDDEN
+//  11. F   = G . W2, no bias (MLP second layer)          VIT_ROWS x VIT_DIM
+//  12. Y   = X1 + F (second residual)                    VIT_ROWS x VIT_DIM
 //
 // Tensors are plain row-major int8 arrays. Compiled -O2.
 #include <stdint.h>
@@ -42,6 +45,11 @@ static const int8_t W1[] = {
 };
 _Static_assert(sizeof W1 == VIT_DIM * VIT_HIDDEN, "the W1 file doesn't match vit.h's sizes");
 
+static const int8_t W2[] = {
+#include "input/row_major/W2_1536_384.txt"
+};
+_Static_assert(sizeof W2 == VIT_HIDDEN * VIT_DIM, "the W2 file doesn't match vit.h's sizes");
+
 static int8_t XN[VIT_ROWS * VIT_DIM];    // LayerNorm output
 static const uint16_t exp_table[] = {
 #include "input/exp_table_256.txt"
@@ -55,12 +63,20 @@ static int8_t O[VIT_ROWS * VIT_DIM];     // head outputs, side by side
 static int8_t A[VIT_ROWS * VIT_DIM];     // output projection
 static int8_t X1[VIT_ROWS * VIT_DIM];    // first residual
 static int8_t XN2[VIT_ROWS * VIT_DIM];   // LN2's output
+static int8_t H[VIT_ROWS * VIT_HIDDEN];  // FC1's output
+static int8_t G[VIT_ROWS * VIT_HIDDEN];  // GELU's output
+static int8_t F[VIT_ROWS * VIT_DIM];     // FC2's output
+
+static const int8_t gelu_table[] = {
+#include "input/gelu_table_256.txt"
+};
+_Static_assert(sizeof gelu_table == 256, "the GELU table must have 256 values");
 
 // Read by run_vit.py after the run: the output (row-major), its size, and
 // the cycles of the whole model and of each step.
-int8_t         vit_out[VIT_ROWS * VIT_HIDDEN];       // FC1's output H
+int8_t         vit_out[VIT_ROWS * VIT_DIM];          // the block's output Y
 const uint32_t vit_out_rows = VIT_ROWS;
-const uint32_t vit_out_cols = VIT_HIDDEN;
+const uint32_t vit_out_cols = VIT_DIM;
 uint64_t       vit_cycles;
 uint64_t       vit_cycles_layernorm1;
 uint64_t       vit_cycles_qkv;
@@ -71,6 +87,9 @@ uint64_t       vit_cycles_proj;
 uint64_t       vit_cycles_residual1;
 uint64_t       vit_cycles_layernorm2;
 uint64_t       vit_cycles_fc1;
+uint64_t       vit_cycles_gelu;
+uint64_t       vit_cycles_fc2;
+uint64_t       vit_cycles_residual2;
 
 // Floor square root of v, bit by bit.
 static uint32_t isqrt64(uint64_t v) {
@@ -210,10 +229,17 @@ static void weighted_values(const int8_t* P, const int8_t* QKV, int8_t* O, uint3
     }
 }
 
-// Y = sat8(rshift(A + B, shift)), element by element.
-static void add(const int8_t* A, const int8_t* B, int8_t* Y, uint32_t n, uint32_t shift) {
+// Y = table[X + 128], element by element.
+static void lookup(const int8_t* X, int8_t* Y, uint32_t n, const int8_t* table) {
     for (uint32_t i = 0; i < n; i++)
-        Y[i] = sat8(rshift(A[i] + B[i], shift));
+        Y[i] = table[X[i] + 128];
+}
+
+// Y = sat8(rshift(A * 2^up + B, shift)), element by element.
+static void add(const int8_t* A, uint32_t up, const int8_t* B, int8_t* Y, uint32_t n,
+                uint32_t shift) {
+    for (uint32_t i = 0; i < n; i++)
+        Y[i] = sat8(rshift(A[i] * (1 << up) + B[i], shift));
 }
 
 int main(void) {
@@ -230,12 +256,18 @@ int main(void) {
     uint64_t t5 = nn_cycles();
     matmul(O, Wo, A, VIT_ROWS, VIT_DIM, VIT_DIM, VIT_PROJ_SHIFT);
     uint64_t t6 = nn_cycles();
-    add(X, A, X1, VIT_ROWS * VIT_DIM, VIT_RES_SHIFT);
+    add(X, 0, A, X1, VIT_ROWS * VIT_DIM, VIT_RES_SHIFT);
     uint64_t t7 = nn_cycles();
     layernorm(X1, XN2, VIT_ROWS, VIT_DIM);
     uint64_t t8 = nn_cycles();
-    matmul(XN2, W1, vit_out, VIT_ROWS, VIT_DIM, VIT_HIDDEN, VIT_FC1_SHIFT);
+    matmul(XN2, W1, H, VIT_ROWS, VIT_DIM, VIT_HIDDEN, VIT_FC1_SHIFT);
     uint64_t t9 = nn_cycles();
+    lookup(H, G, VIT_ROWS * VIT_HIDDEN, gelu_table);
+    uint64_t t10 = nn_cycles();
+    matmul(G, W2, F, VIT_ROWS, VIT_HIDDEN, VIT_DIM, VIT_FC2_SHIFT);
+    uint64_t t11 = nn_cycles();
+    add(X1, VIT_RES2_X1_UP, F, vit_out, VIT_ROWS * VIT_DIM, VIT_RES2_SHIFT);
+    uint64_t t12 = nn_cycles();
 
     vit_cycles_layernorm1 = t1 - t0;
     vit_cycles_qkv       = t2 - t1;
@@ -246,6 +278,9 @@ int main(void) {
     vit_cycles_residual1 = t7 - t6;
     vit_cycles_layernorm2 = t8 - t7;
     vit_cycles_fc1       = t9 - t8;
-    vit_cycles           = t9 - t0;
+    vit_cycles_gelu      = t10 - t9;
+    vit_cycles_fc2       = t11 - t10;
+    vit_cycles_residual2 = t12 - t11;
+    vit_cycles           = t12 - t0;
     return 0;
 }

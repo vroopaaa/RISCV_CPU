@@ -6,7 +6,7 @@
 
 // The activation matrix is VIT_NUM_BATCHES batches of VIT_BATCH rows,
 // stacked: VIT_ROWS x VIT_DIM. Change VIT_NUM_BATCHES to pick another input.
-#define VIT_NUM_BATCHES 6u
+#define VIT_NUM_BATCHES 1u
 #define VIT_BATCH       32u     // rows per batch
 #define VIT_ROWS        (VIT_NUM_BATCHES * VIT_BATCH)
 #define VIT_DIM         384u    // embedding width
@@ -90,5 +90,20 @@ _Static_assert(VIT_HEAD_DIM == 64, "VIT_SCORE_SHIFT assumes sqrt(head dim) = 8")
 // MLP first layer: H = XN2 . W1, no bias. W1 has f = 9, so the int32 sum has
 // f = 5 + 9 = 14; shifting by 9 leaves H at f = 5.
 #define VIT_FC1_SHIFT 9u
+
+// GELU: G = GELU(H), element by element, through the 256-entry table
+// input/gelu_table_256.txt, table[i] = sat8(round(GELU((i - 128) / 32) * 32)).
+// Input and output both have f = 5, so G stays at f = 5.
+
+// MLP second layer: F = G . W2, no bias. W2 has f = 10 (its sums have 1536
+// terms, four times FC1's, so its weights are half as large), so the int32
+// sum has f = 5 + 10 = 15; shifting by 10 leaves F at f = 5.
+#define VIT_FC2_SHIFT 10u
+
+// Second residual: Y = X1 + F, the block's output. X1 has f = 4 and F f = 5,
+// so X1 is first scaled up to f = 5 (times 2^VIT_RES2_X1_UP), and the sum goes
+// back to f = 4 like X1: Y = sat8(rshift(X1 * 2 + F, 1)).
+#define VIT_RES2_X1_UP 1u
+#define VIT_RES2_SHIFT 1u
 
 #endif // VIT_H
